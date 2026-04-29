@@ -13,6 +13,7 @@
 #include <vector>
 #include <pthread.h>
 #include <sys/time.h>
+#include <algorithm>
   
 /** * @namespace IDSConstants    
  * @brief Constants specific to IDS camera driver implementation    
@@ -112,14 +113,9 @@ protected:
     std::string m_bayerPattern;  
     
     // CAMERA SETUP FUNCTIONS    
-    bool setupGainSelector();    
+    bool selectGainChannel();    
     bool setupBlackLevel();    
   
-    // New helper declaration for conversion  
-    void applyPixelConversion(const uint8_t* src, uint8_t* dst, uint32_t width, uint32_t height);  
-      
-    void safeDeleteProperty(const char *propertyName);  
-    
 private:    
     // Threading infrastructure    
     typedef enum ImageState    
@@ -160,7 +156,6 @@ private:
     void allocateFrameBuffer();    
     void cleanupConnection();    
     void addCaptureFormat(const PixelFormatInfo &format);  
-    bool validateRequiredNodes();  
     
     // BAYER HELPER FUNCTIONS  
     std::string mapCameraFormatToBayerPattern(const std::string& formatName);  
