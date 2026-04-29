@@ -2636,21 +2636,44 @@ void IDS_CCD::expand12bitPackedTo16bit(const uint8_t *src, uint8_t *dst, uint32_
 void IDS_CCD::setupTemperatureSensor()
 {
     HasTemperature = false;
-    try {
-        if (!tempNode)
-            tempNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("DeviceTemperature");
+    tempNode = nullptr;
+    tempSelectorNode = nullptr;
 
-        if (!tempNode || !tempNode->IsAvailable()) {
-            auto tempSelector = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("DeviceTemperatureSelector");
-            if (tempSelector && tempSelector->IsAvailable()) {
-                tempSelector->SetCurrentEntry("Sensor"); 
-                // Re-cache after selection
-                tempNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("DeviceTemperature");
-            }
+    if (!nodeMapRemoteDevice)
+    {
+        LOG_WARN("Cannot setup temperature sensor: node map is not available.");
+        return;
+    }
+
+    try
+    {
+        tempSelectorNode =
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("DeviceTemperatureSelector");
+
+        if (tempSelectorNode && tempSelectorNode->IsAvailable() && tempSelectorNode->IsWriteable())
+        {
+            tempSelectorNode->SetCurrentEntry("Mainboard");
         }
-        HasTemperature = (tempNode && tempNode->IsAvailable());
-    } catch (...) {
+
+        tempNode =
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("DeviceTemperature");
+
+        HasTemperature =
+            tempNode &&
+            tempNode->IsAvailable() &&
+            tempNode->IsReadable();
+
+        if (HasTemperature)
+            LOG_INFO("Temperature sensor available.");
+        else
+            LOG_INFO("Temperature sensor not available.");
+    }
+    catch (const std::exception &e)
+    {
         HasTemperature = false;
+        tempNode = nullptr;
+        tempSelectorNode = nullptr;
+        LOGF_INFO("Temperature sensor not available: %s", e.what());
     }
 }
 
@@ -2659,29 +2682,45 @@ void IDS_CCD::setupTemperatureSensor()
  * @return Temperature in Celsius, or -273.15 if unavailable.
  */
 
-double IDS_CCD::getTemperature()   
-{  
-    // If initCamera determined no sensor was available, exit early  
-    if (!HasTemperature)  
-    {  
-        return IDSConstants::INVALID_TEMPERATURE;  
-    }  
-  
-    try   
-    {  
-        // Use the cached tempNode pointer  
-        if (tempNode && tempNode->IsAvailable() && tempNode->AccessStatus() != peak::core::nodes::NodeAccessStatus::WriteOnly)  
-        {  
-            return tempNode->Value();  
-        }  
-    }  
-    catch (const std::exception &e)   
-    {  
-        // Log the error but don't crash; return absolute zero fallback  
-        LOGF_DEBUG("Failed to read temperature from cached node: %s", e.what());  
-    }  
-  
-    return IDSConstants::INVALID_TEMPERATURE;  
+double IDS_CCD::getTemperature()
+{
+    if (!HasTemperature || !tempNode)
+        return IDSConstants::INVALID_TEMPERATURE;
+
+    try
+    {
+        if (!tempNode->IsAvailable() || !tempNode->IsReadable())
+            return IDSConstants::INVALID_TEMPERATURE;
+
+        return tempNode->Value();
+    }
+    catch (const std::exception &e)
+    {
+        LOGF_DEBUG("Failed to read temperature: %s", e.what());
+        return IDSConstants::INVALID_TEMPERATURE;
+    }
+}
+
+void IDS_CCD::updateTemperatureProperty()
+{
+    if (!HasTemperature)
+        return;
+
+    const double temperature = getTemperature();
+
+    if (temperature <= IDSConstants::INVALID_TEMPERATURE)
+        return;
+
+    if (TemperatureNP.getDeviceName() == nullptr || strlen(TemperatureNP.getDeviceName()) == 0)
+    {
+        LOG_WARN("Skipping temperature update: Property not yet defined to INDI.");
+        return;
+    }
+
+    TemperatureNP[0].setValue(temperature);
+
+    if (isConnected())
+        TemperatureNP.apply();
 }
 
 void IDS_CCD::updateBlackLevelRange()    
@@ -2827,31 +2866,8 @@ bool IDS_CCD::setupParams()
   
     try  
     {  
-        // Temperature sensor handling with proper error checking  
-        try {  
-            tempNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("DeviceTemperature");  
-            HasTemperature = (tempNode && tempNode->IsAvailable() && tempNode->IsReadable());  
-              
-            if (HasTemperature) {  
-                double temperature = tempNode->Value();  
-                  
-                // CRITICAL: Only apply if the property has been registered (defined)  
-                if (TemperatureNP.getDeviceName() != nullptr && strlen(TemperatureNP.getDeviceName()) > 0) {  
-                    TemperatureNP[0].setValue(temperature);  
-                      
-                    // Only apply if the driver is actually connected to avoid startup noise  
-                    if (isConnected()) {  
-                        TemperatureNP.apply();  
-                    }  
-                } else {  
-                    LOG_WARN("Skipping temperature update: Property not yet defined to INDI.");  
-                }  
-            }  
-        } catch (const std::exception & e) {  
-            HasTemperature = false;  
-            tempNode = nullptr;  
-            LOGF_INFO("Temperature sensor not available: %s", e.what());    
-        } 
+        setupTemperatureSensor();
+        updateTemperatureProperty();
           
         // Query sensor dimensions  
         // These are Read-Only in your list, ensure they exist before calling .Value()  
@@ -2865,12 +2881,13 @@ bool IDS_CCD::setupParams()
         }  
   
         // Query pixel size directly from camera (µm)  
-        auto pixelWidthNode  = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("SensorPixelWidth");  
-        auto pixelHeightNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("SensorPixelHeight");  
-  
-        if (pixelWidthNode && pixelHeightNode) {  
-            pixelSizeX = pixelWidthNode->Value();  
-            pixelSizeY = pixelHeightNode->Value();  
+        pixelWidthNode  = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("SensorPixelWidth");
+        pixelHeightNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("SensorPixelHeight");
+
+        if (pixelWidthNode && pixelHeightNode)
+        {
+            pixelSizeX = pixelWidthNode->Value();
+            pixelSizeY = pixelHeightNode->Value();
         }
         
         // Ensure the NodeMap is valid before proceeding  
