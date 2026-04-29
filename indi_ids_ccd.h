@@ -10,6 +10,9 @@
 #include <string>  
 #include <mutex>  
 #include <memory>  
+#include <vector>
+#include <pthread.h>
+#include <sys/time.h>
   
 /** * @namespace IDSConstants    
  * @brief Constants specific to IDS camera driver implementation    
@@ -82,7 +85,8 @@ protected:
     
     // TEMPERATURE CONTROL FUNCTIONS    
     void setupTemperatureSensor();  
-    double getTemperature();    
+    double getTemperature();   
+    void updateTemperatureProperty(); 
     
     // IMAGE CAPTURE AND FORMATTING    
     virtual bool SetCaptureFormat(uint8_t index) override;    
@@ -188,7 +192,7 @@ private:
     std::shared_ptr<peak::core::nodes::EnumerationNode> userSetNode;  
     std::shared_ptr<peak::core::nodes::CommandNode> acquisitionStartNode, acquisitionStopNode;  
     std::shared_ptr<peak::core::nodes::FloatNode> tempNode;  
-    std::shared_ptr<peak::core::nodes::StringNode> tempSelectorNode;  
+    std::shared_ptr<peak::core::nodes::EnumerationNode> tempSelectorNode;
     std::shared_ptr<peak::core::nodes::FloatNode> gainNode;  
     std::shared_ptr<peak::core::nodes::FloatNode> blackLevelNode;  
     std::shared_ptr<peak::core::nodes::FloatNode> offsetNode;  
