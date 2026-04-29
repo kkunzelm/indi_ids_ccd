@@ -128,6 +128,7 @@ private:
         StateTerminated    
     } ImageState;    
     
+    bool m_threadRunning { false };
     bool m_propertiesReady {false};  
     bool m_captureFormatsDefined { false };  
       
@@ -191,9 +192,13 @@ private:
     std::shared_ptr<peak::core::nodes::FloatNode> pixelWidthNode, pixelHeightNode;  
     
     // EXPOSURE STATE TRACKING    
-    bool InExposure { false };    
-    float TemperatureRequest { 0 };    
-    struct timeval ExpStart;    
+    std::atomic_bool InExposure { false };
+    std::atomic_bool m_isAcquiring { false };
+
+    float TemperatureRequest { 0 };
+
+    std::mutex exposureStateMutex;
+    struct timeval ExpStart {};
     
     // CAMERA HARDWARE PARAMETERS    
     int cameraWidth { 0 };    
@@ -229,6 +234,7 @@ private:
     bool m_userSetsQueried = false;    
     
     // EXPOSURE LIMITS AND CONFIGURATION    
+    std::shared_ptr<peak::core::nodes::FloatNode> findExposureNode();
     bool queryExposureLimits();    
     double fullMin, fullMax;    
     double exposureStep = 0.001;    
@@ -238,8 +244,6 @@ private:
     void debugCurrentState();    
     int timerID = -1;  
       
-    bool m_isAcquiring = false;   // tracks whether camera is in acquisition mode  
-    
     // BLACK LEVEL CONTROL    
     void updateBlackLevelRange();    
     void resetBlackLevelToDefault();    
