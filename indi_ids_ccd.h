@@ -23,10 +23,7 @@ namespace IDSConstants
     constexpr int DEFAULT_POLLING_PERIOD_MS = 500;    
         
     /// Conversion factor: microseconds to seconds (1,000,000 μs = 1 s)    
-    constexpr double MICROSEC_PER_SEC = 1000000.0;  
-  
-    /// Exposure unit conversion (1e-6 for microseconds)  
-    constexpr double EXPOSURE_UNIT_SCALE = 1e-6;  
+    constexpr double MICROSECONDS_PER_SECOND = 1'000'000.0; 
       
     constexpr double INVALID_TEMPERATURE = -273.15;  
 }    
