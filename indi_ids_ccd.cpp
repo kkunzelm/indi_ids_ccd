@@ -10,8 +10,6 @@
 #include <arpa/inet.h>  
 #endif
 
-// Macro shortcut to CCD temperature value
-#define currentCCDTemperature TemperatureN[0].value
 
 /** + * GLOBAL MULTI-CAMERA LOADER
  */
@@ -295,13 +293,10 @@ bool IDS_CCD::updateProperties()
     LOG_INFO("checkpoint: updateProperties()");      
           
       
-    if (isConnected() && !m_propertiesReady)        
-    {        
-        // First time connection - do full setup    
-        if (!setupParams())        
-            return false;        
-        m_propertiesReady = true;        
-    }            
+    if (isConnected() && !m_propertiesReady)
+    {
+        m_propertiesReady = true;
+    }           
       
     // 1. Let the base class handle standard CCD properties      
     INDI::CCD::updateProperties();      
@@ -673,9 +668,6 @@ void IDS_CCD::queryCameraCapabilities()
         LOGF_DEBUG("No binning control: %s", e.what());      
     }      
           
-    // Query pixel formats    
-    queryPixelFormats();        
-          
     // Get sensor info      
     try      
     {      
@@ -758,40 +750,48 @@ bool IDS_CCD::configureExposure(float duration)
     }  
 }
 
-bool IDS_CCD::startAcquisition()  
-{  
-    if (m_isAcquiring) {  
-        LOG_WARN("Acquisition already in progress.");  
-        return true;  
-    }  
-  
-    // Fix: Remove isValid(). Just check the pointer.  
-    if (!dataStream) {  
-        LOG_ERROR("Data stream not initialized.");  
-        return false;  
-    }  
-  
-    try {  
-        // 1. Start the software data stream (prepare to receive)  
-        dataStream->StartAcquisition();  
-  
-        // 2. Start the hardware device (prepare to send)  
-        auto startNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("AcquisitionStart");  
-        if (startNode && startNode->IsAvailable()) {  
-            startNode->Execute();  
-        } else {  
-            throw std::runtime_error("AcquisitionStart node not available");  
-        }  
-  
-        m_isAcquiring = true;  
-        InExposure = true;  
-        LOG_DEBUG("Acquisition started (Stream + Device).");  
-        return true;  
-  
-    } catch (const std::exception& ex) {  
-        LOGF_ERROR("Error starting acquisition: %s", ex.what());  
-        return false;  
-    }  
+bool IDS_CCD::startAcquisition()
+{
+    if (m_isAcquiring)
+    {
+        LOG_WARN("Acquisition already in progress.");
+        return true;
+    }
+
+    if (!dataStream)
+    {
+        LOG_ERROR("Data stream not initialized.");
+        return false;
+    }
+
+    try
+    {
+        // 1. Start the software stream for one frame
+        dataStream->StartAcquisition(peak::core::AcquisitionStartMode::Default, 1);
+
+        // 2. Start the camera hardware
+        if (acquisitionStartNode && acquisitionStartNode->IsAvailable())
+        {
+            acquisitionStartNode->Execute();
+        }
+        else
+        {
+            throw std::runtime_error("AcquisitionStart node not available");
+        }
+
+        m_isAcquiring = true;
+        InExposure = true;
+
+        LOG_DEBUG("Acquisition started.");
+        return true;
+    }
+    catch (const std::exception &ex)
+    {
+        LOGF_ERROR("Error starting acquisition: %s", ex.what());
+        m_isAcquiring = false;
+        InExposure = false;
+        return false;
+    }
 }
 
 bool IDS_CCD::stopAcquisition()
@@ -828,91 +828,83 @@ bool IDS_CCD::stopAcquisition()
     }
 }
 
-bool IDS_CCD::StartExposure(float duration)      
-{     
-    if (InExposure)      
-    {      
-        LOG_ERROR("Exposure already in progress. Abort current exposure first.");      
-        return false;      
-    }      
-      
-    // Validate exposure duration against available limits      
-    if (duration < fullMin || duration > fullMax)      
-    {      
-        LOGF_ERROR("Exposure duration %.6fs is out of range [%.6fs, %.6fs]",       
-                   duration, fullMin, fullMax);      
-        return false;      
-    }      
-      
-    // Store exposure request for thread    
-    m_ExposureRequest = duration;    
-      
-    // Determine which user set is needed for this duration      
-    std::string targetUserSet = determineUserSetForDuration(duration);      
-      
-    // Switch user set if needed      
-    if (targetUserSet != currentUserSet)      
-    {      
-        if (!switchUserSet(targetUserSet))      
-        {      
-            LOG_ERROR("Failed to switch exposure mode");      
-            return false;      
-        }      
-        currentUserSet = targetUserSet;      
-    }      
-      
-    if (!configureExposure(duration))      
-    {      
-        LOG_ERROR("Failed to configure exposure duration.");      
-        return false;      
-    }      
-      
-    // ADD RESOURCE CHECK HERE  
-    try {  
-        // Check if stream is already running and stop it first  
-        if (dataStream && dataStream->IsGrabbing()) {  
-            LOG_WARN("Data stream is already active, stopping it first...");  
-              
-            // Stop hardware acquisition  
-            if (acquisitionStopNode && acquisitionStopNode->IsAvailable()) {  
-                acquisitionStopNode->Execute();  
-                acquisitionStopNode->WaitUntilDone();  
-            }  
-              
-            // Stop software stream  
-            dataStream->StopAcquisition(peak::core::AcquisitionStopMode::Default);  
-            LOG_INFO("Previous acquisition stopped successfully");  
-        }  
-    } catch (const std::exception &e) {  
-        LOGF_WARN("Could not stop previous acquisition: %s", e.what());  
-    }  
-      
-    try      
-    {      
-        dataStream->StartAcquisition(peak::core::AcquisitionStartMode::Default, 1);      
-        nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("AcquisitionStart")->Execute();      
-    }      
-    catch (const std::exception &e)      
-    {      
-        LOGF_ERROR("Failed to start acquisition: %s", e.what());      
-        return false;      
-    }      
-      
-    gettimeofday(&ExpStart, nullptr);      
-    PrimaryCCD.setExposureDuration(duration);      
-    InExposure = true;      
-      
-    LOGF_INFO("Starting %.3f second exposure (%s mode).", duration, targetUserSet.c_str());      
-      
-    // Signal imaging thread to handle exposure monitoring    
-    pthread_mutex_lock(&condMutex);    
-    m_ThreadRequest = StateExposure;    
-    pthread_cond_signal(&cv);    
-    pthread_mutex_unlock(&condMutex);    
-      
-    SetTimer(getCurrentPollingPeriod());      
-      
-    return true;      
+bool IDS_CCD::StartExposure(float duration)
+{
+    if (InExposure || m_isAcquiring)
+    {
+        LOG_ERROR("Exposure already in progress. Abort current exposure first.");
+        return false;
+    }
+
+    // Validate exposure duration against available limits
+    if (duration < fullMin || duration > fullMax)
+    {
+        LOGF_ERROR("Exposure duration %.6fs is out of range [%.6fs, %.6fs]",
+                   duration, fullMin, fullMax);
+        return false;
+    }
+
+    // Determine which user set is needed for this duration
+    std::string targetUserSet = determineUserSetForDuration(duration);
+
+    // Switch user set if needed
+    if (targetUserSet != currentUserSet)
+    {
+        if (!switchUserSet(targetUserSet))
+        {
+            LOG_ERROR("Failed to switch exposure mode");
+            return false;
+        }
+
+        currentUserSet = targetUserSet;
+    }
+
+    // Configure exposure after possible user-set switch
+    if (!configureExposure(duration))
+    {
+        LOG_ERROR("Failed to configure exposure duration.");
+        return false;
+    }
+
+    // Ensure no stale acquisition is still active
+    if (dataStream && dataStream->IsGrabbing())
+    {
+        LOG_WARN("Data stream is already active, stopping it first.");
+
+        if (!stopAcquisition())
+        {
+            LOG_ERROR("Failed to stop previous acquisition.");
+            return false;
+        }
+    }
+
+    // Store exposure request for timing thread
+    m_ExposureRequest = duration;
+
+    // Set exposure start time immediately before starting acquisition
+    gettimeofday(&ExpStart, nullptr);
+
+    PrimaryCCD.setExposureDuration(duration);
+    PrimaryCCD.setExposureLeft(duration);
+
+    if (!startAcquisition())
+    {
+        LOG_ERROR("Failed to start acquisition.");
+        return false;
+    }
+
+    LOGF_INFO("Starting %.3f second exposure (%s mode).",
+              duration, targetUserSet.c_str());
+
+    // Signal imaging thread to handle exposure monitoring
+    pthread_mutex_lock(&condMutex);
+    m_ThreadRequest = StateExposure;
+    pthread_cond_signal(&cv);
+    pthread_mutex_unlock(&condMutex);
+
+    SetTimer(getCurrentPollingPeriod());
+
+    return true;
 }
 
 std::string IDS_CCD::determineUserSetForDuration(float duration)  
@@ -1128,23 +1120,10 @@ void IDS_CCD::TimerHit()
 
     if (InExposure)
     {
-        float timeLeft = CalcTimeLeft();
-
-        if (timeLeft <= 0.0f)
-        {
-            if (!grabImage())
-            {
-                PrimaryCCD.setExposureFailed();
-            }
-        }
-        else
-        {
-            // Update remaining exposure time for INDI clients
-            PrimaryCCD.setExposureLeft(timeLeft);
-        }
+        const float timeLeft = CalcTimeLeft();
+        PrimaryCCD.setExposureLeft(std::max(0.0f, timeLeft));
     }
 
-    // Restart timer for next polling interval
     SetTimer(getCurrentPollingPeriod());
 }
 
@@ -1230,24 +1209,7 @@ int IDS_CCD::grabImage()
     }  
 }
 
-void IDS_CCD::applyPixelConversion(const uint8_t* src, uint8_t* dst, uint32_t width, uint32_t height) 
-{
-    if (!pixelFormatNode) return;
-
-    std::string format = pixelFormatNode->CurrentEntry()->SymbolicValue();
-    auto it = m_formatMap.find(format);
-    
-    if (it != m_formatMap.end() && it->second.expandFunc) 
-    {
-        it->second.expandFunc(src, dst, width, height);
-    }
-    else 
-    {
-        LOGF_WARN("Conversion requested for format %s but no expand function is mapped.", format.c_str());
-    }
-}
-
-bool IDS_CCD::setupGainSelector()  
+bool IDS_CCD::selectGainChannel()  
 {  
     try  
     {  
@@ -1399,25 +1361,27 @@ void IDS_CCD::addFITSKeywords(INDI::CCDChip *targetChip, std::vector<INDI::FITSR
     fitsKeywords.push_back(INDI::FITSRecord("INSTRUME", getDeviceName(), "Camera Model and Serial"));
 
     // Use cached pixelFormatNode for efficiency
-    std::string currentFormat;    if (pixelFormatNode)  
-    {  
-        std::string currentFormat = pixelFormatNode->CurrentEntry()->SymbolicValue();  
-        fitsKeywords.push_back(INDI::FITSRecord("PIXFORM", currentFormat.c_str(), "Pixel Format"));  
-          
-        // Consolidated Bit Depth Logic
+    std::string currentFormat;
+
+    if (pixelFormatNode)
+    {
+        currentFormat = pixelFormatNode->CurrentEntry()->SymbolicValue();
+
+        fitsKeywords.push_back(INDI::FITSRecord("PIXFORM", currentFormat.c_str(), "Pixel Format"));
+
         if (currentFormat == "Mono10p" || currentFormat == "Mono10")
-        {  
-            fitsKeywords.push_back(INDI::FITSRecord("BITDEPTH", 10.0, "Original Bit Depth"));  
-            fitsKeywords.push_back(INDI::FITSRecord("BSCALE", 64.0, "Scaling factor to 16-bit"));  
-            fitsKeywords.push_back(INDI::FITSRecord("BZERO", 0.0, "Zero offset"));  
-        }  
-        else if (currentFormat == "Mono12p" || currentFormat == "Mono12")  
-        {  
-            fitsKeywords.push_back(INDI::FITSRecord("BITDEPTH", 12.0, "Original Bit Depth"));  
-            fitsKeywords.push_back(INDI::FITSRecord("BSCALE", 16.0, "Scaling factor to 16-bit"));  
-            fitsKeywords.push_back(INDI::FITSRecord("BZERO", 0.0, "Zero offset"));  
-        }  
-    }  
+        {
+            fitsKeywords.push_back(INDI::FITSRecord("BITDEPTH", 10.0, "Original Bit Depth"));
+            fitsKeywords.push_back(INDI::FITSRecord("BSCALE", 64.0, "Scaling factor to 16-bit"));
+            fitsKeywords.push_back(INDI::FITSRecord("BZERO", 0.0, "Zero offset"));
+        }
+        else if (currentFormat == "Mono12p" || currentFormat == "Mono12")
+        {
+            fitsKeywords.push_back(INDI::FITSRecord("BITDEPTH", 12.0, "Original Bit Depth"));
+            fitsKeywords.push_back(INDI::FITSRecord("BSCALE", 16.0, "Scaling factor to 16-bit"));
+            fitsKeywords.push_back(INDI::FITSRecord("BZERO", 0.0, "Zero offset"));
+        }
+    } 
       
     // Add bit depth information  
     fitsKeywords.push_back(INDI::FITSRecord("BITPIX", static_cast<double>(cameraBPP), "Bits per Pixel"));  
@@ -1689,7 +1653,6 @@ bool IDS_CCD::UpdateCCDBin(int binX, int binY)
     {      
         // Check if BinningSelector exists and is usable      
         auto binSelectorNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("BinningSelector");      
-        bool useSelector = false;      
               
         if (binSelectorNode && binSelectorNode->IsWriteable())      
         {      
@@ -1703,7 +1666,6 @@ bool IDS_CCD::UpdateCCDBin(int binX, int binY)
                     entryName = entry->SymbolicValue();      
                     binSelectorNode->SetCurrentEntry(entryName);      
                     LOGF_DEBUG("Using binning selector entry: %s", entryName.c_str());      
-                    useSelector = true;      
                     break;      
                 }      
                 catch (const std::exception &e)      
@@ -1963,216 +1925,76 @@ bool IDS_CCD::queryExposureLimits()
     }    
 }
 
-void IDS_CCD::debugCurrentState()  
-{  
-    try  
-    {  
-        auto userSetSelector = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("UserSetSelector");  
-  
-        LOG_DEBUG("=== Current Camera State ===");  
-        if (userSetSelector)  
-            LOGF_DEBUG("UserSetSelector: %s", userSetSelector->CurrentEntry()->SymbolicValue().c_str());  
-  
-        LOGF_DEBUG("PixelFormat: %s", pixelFormatNode->CurrentEntry()->SymbolicValue().c_str());  
-        LOGF_DEBUG("Exposure range: %.3f - %.3f seconds", minExposure, maxExposure);  
-  
-        LOGF_DEBUG("Frame: %dx%d at (%d,%d)", PrimaryCCD.getSubW(), PrimaryCCD.getSubH(), PrimaryCCD.getSubX(),  
-                   PrimaryCCD.getSubY());  
-    }  
-    catch (const std::exception &e)  
-    {  
-        LOGF_ERROR("Failed to debug current state: %s", e.what());  
-    }  
+/*  not used by default, call it manually during debugging if needed 
+    1. At the end of Connect()
+    2. After switchUserSet()
+    3. After SetCaptureFormat()
+    4. After UpdateCCDFrame() and UpdateCCDBin()
+*/
+
+void IDS_CCD::debugCurrentState()
+{
+    try
+    {
+        LOG_DEBUG("=== Current Camera State ===");
+
+        if (nodeMapRemoteDevice)
+        {
+            try
+            {
+                auto userSetSelector =
+                    nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("UserSetSelector");
+
+                if (userSetSelector && userSetSelector->IsAvailable())
+                {
+                    LOGF_DEBUG("UserSetSelector: %s",
+                               userSetSelector->CurrentEntry()->SymbolicValue().c_str());
+                }
+            }
+            catch (...)
+            {
+                LOG_DEBUG("UserSetSelector: unavailable");
+            }
+        }
+
+        if (pixelFormatNode && pixelFormatNode->IsAvailable())
+        {
+            LOGF_DEBUG("PixelFormat: %s",
+                       pixelFormatNode->CurrentEntry()->SymbolicValue().c_str());
+        }
+        else
+        {
+            LOG_DEBUG("PixelFormat: unavailable");
+        }
+
+        LOGF_DEBUG("Exposure range: %.6f - %.6f seconds, step %.6f",
+                   minExposure, maxExposure, exposureStep);
+
+        LOGF_DEBUG("Full exposure range: %.6f - %.6f seconds, LongExposure threshold %.6f",
+                   fullMin, fullMax, longExposureMin);
+
+        LOGF_DEBUG("Frame: %dx%d at (%d,%d), binning %dx%d",
+                   PrimaryCCD.getSubW(), PrimaryCCD.getSubH(),
+                   PrimaryCCD.getSubX(), PrimaryCCD.getSubY(),
+                   PrimaryCCD.getBinX(), PrimaryCCD.getBinY());
+
+        LOGF_DEBUG("Sensor: %dx%d, BPP: %d, Pixel size: %.2f x %.2f um",
+                   cameraWidth, cameraHeight, cameraBPP, pixelSizeX, pixelSizeY);
+
+        LOGF_DEBUG("State: InExposure=%s, IsAcquiring=%s, HasGain=%s, HasOffset=%s, HasTemperature=%s, HasBayer=%s",
+                   InExposure ? "true" : "false",
+                   m_isAcquiring ? "true" : "false",
+                   HasGain ? "true" : "false",
+                   HasOffset ? "true" : "false",
+                   HasTemperature ? "true" : "false",
+                   m_hasBayer ? "true" : "false");
+    }
+    catch (const std::exception &e)
+    {
+        LOGF_ERROR("Failed to debug current state: %s", e.what());
+    }
 }
 
-
-
-
-//void IDS_CCD::queryPixelFormats()        
-//{        
-//    LOG_INFO("=== queryPixelFormats() ENTRY ===");        
-//    LOG_INFO("=== Starting queryPixelFormats() ===");        
-//        
-//    m_formatMap.clear();        
-//    LOG_INFO("after: m_formatMap.clear();");      
-//    m_supportedBitDepths.clear();        
-//    LOG_INFO("after: m_supportedBitDepths.clear();");      
-//    m_compressionSupport.clear();        
-//    LOG_INFO("after: m_compressionSupport.clear();");      
-//        
-//    // Add missing variable declaration    
-//    bool supportsCompression = false;    
-//        
-//    try        
-//    {        
-//        // Use cached node if available, otherwise find it        
-//        LOG_INFO("Checking nodeMapRemoteDevice...(before IF)");       
-//        if (!pixelFormatNode) {        
-//            LOG_INFO("Querying pixel format node...");         
-//            pixelFormatNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");        
-//            LOG_INFO("PixelFormat node found successfully");        
-//        } else {        
-//            LOG_INFO("Using cached PixelFormat node");        
-//        }        
-//        
-//        LOG_INFO("Getting pixel format entries...");        
-//        auto allEntries = pixelFormatNode->Entries();        
-//        LOGF_INFO("Found %zu pixel format entries", allEntries.size());        
-//        
-//        // Track supported modes    
-//        bool supports8bit  = false;        
-//        bool supports10bit = false;        
-//        bool supports12bit = false;        
-//        bool supports16bit = false;        
-//        
-//        LOG_INFO("Processing pixel format entries...");        
-//        int processedEntries = 0;        
-//        for (const auto &entry : allEntries)        
-//        {        
-//            processedEntries++;        
-//            if (processedEntries % 10 == 0) {        
-//                LOGF_DEBUG("Processed %d entries so far...", processedEntries);        
-//            }        
-//        
-//            if (entry->AccessStatus() == peak::core::nodes::NodeAccessStatus::NotAvailable ||        
-//                entry->AccessStatus() == peak::core::nodes::NodeAccessStatus::NotImplemented)        
-//            {        
-//                continue;        
-//            }        
-//        
-//            std::string formatName = entry->SymbolicValue();        
-//            LOGF_DEBUG("Processing format: %s", formatName.c_str());        
-//        
-//            // Only include mono formats        
-//            if (formatName.find("Mono") == 0)        
-//            {        
-//                // Check bit depth support and populate format map      
-//                if (formatName == "Mono8")        
-//                {        
-//                    supports8bit = true;      
-//                    m_formatMap["Mono8"] = PixelFormatInfo(      
-//                        "Mono8",           // idsName      
-//                        "Mono8",           // indiName      
-//                        8,                 // bitsPerPixel      
-//                        false,             // packed     
-//                        false,             // isDefault    
-//                        nullptr            // expandFunc      
-//                    );      
-//                    LOGF_INFO("Available: 8-bit uncompressed (%s)", formatName.c_str());        
-//                }        
-//                else if (formatName == "Mono8p")        
-//                {        
-//                    supports8bit = true;      
-//                    supportsCompression = true;      
-//                    m_compressionSupport[8] = true;      
-//                    m_formatMap["Mono8_Packed"] = PixelFormatInfo(      
-//                        "Mono8p",           // idsName      
-//                        "Mono8_Packed",     // indiName      
-//                        8,                 // bitsPerPixel      
-//                        true,              // packed      
-//                        false,             // isDefault    
-//                        nullptr            // expandFunc      
-//                    );      
-//                    LOGF_INFO("Available: 8-bit compressed (%s)", formatName.c_str());        
-//                }        
-//                else if (formatName == "Mono10")        
-//                {        
-//                    supports10bit = true;      
-//                    // For Mono10 uncompressed      
-//                    m_formatMap["Mono10"] = PixelFormatInfo(        
-//                        "Mono10",           // idsName        
-//                        "Mono10",           // indiName        
-//                        16,                // bitsPerPixel        
-//                        false,             // packed    
-//                        false,             // isDefault    
-//                        [this](const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {        
-//                            expand10bitTo16bit(src, dst, w, h);  // Remove extra parameter  
-//                        }         
-//                    );       
-//                    LOGF_INFO("Available: 10-bit uncompressed (%s)", formatName.c_str());        
-//                }        
-//                else if (formatName == "Mono10p")        
-//                {        
-//                    supports10bit = true;      
-//                    supportsCompression = true;      
-//                    m_compressionSupport[10] = true;      
-//                    m_formatMap["Mono10_Packed"] = PixelFormatInfo(      
-//                        "Mono10p",           // idsName      
-//                        "Mono10_Packed",     // indiName      
-//                        16,                // bitsPerPixel      
-//                        true,              // packed      
-//                        false,             // isDefault    
-//                        [this](const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {      
-//                            expand10bitTo16bit(src, dst, w, h);  // Remove extra parameter  
-//                        }      
-//                    );      
-//                    LOGF_INFO("Available: 10-bit compressed (%s)", formatName.c_str());        
-//                }        
-//                else if (formatName == "Mono12")        
-//                {        
-//                    supports12bit = true;      
-//                    // For Mono12 uncompressed        
-//                    m_formatMap["Mono12"] = PixelFormatInfo(        
-//                        "Mono12",           // idsName        
-//                        "Mono12",           // indiName        
-//                        16,                // bitsPerPixel        
-//                        false,             // packed     
-//                        false,             // isDefault    
-//                        [this](const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {        
-//                            expand12bitTo16bit(src, dst, w, h);  // Remove extra parameter  
-//                        }       
-//                    );     
-//                    LOGF_INFO("Available: 12-bit uncompressed (%s)", formatName.c_str());        
-//                }        
-//                else if (formatName == "Mono12p")        
-//                {        
-//                    supports12bit = true;      
-//                    supportsCompression = true;      
-//                    m_compressionSupport[12] = true;      
-//                    m_formatMap["Mono12_Packed"] = PixelFormatInfo(      
-//                        "Mono12p",           // idsName      
-//                        "Mono12_Packed",     // indiName      
-//                        16,                // bitsPerPixel      
-//                        true,              // packed        
-//                        false,             // isDefault    
-//                        [this](const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {      
-//                            expand12bitTo16bit(src, dst, w, h);  // Remove extra parameter  
-//                        }      
-//                    );      
-//                    LOGF_INFO("Available: 12-bit compressed (%s)", formatName.c_str());        
-//                }        
-//            }         
-//        }        
-//        
-//        LOG_INFO("Finished processing entries, creating summary...");        
-//        
-//        // -------------------------        
-//        // Bit depth summary        
-//        // -------------------------        
-//        if (supports8bit)  m_supportedBitDepths.push_back(8);        
-//        if (supports10bit) m_supportedBitDepths.push_back(10);        
-//        if (supports12bit) m_supportedBitDepths.push_back(12);        
-//        if (supports16bit) m_supportedBitDepths.push_back(16);        
-//        
-//        m_maxBitDepth = 8;        
-//        if (supports10bit) m_maxBitDepth = 10;        
-//        if (supports12bit) m_maxBitDepth = 12;        
-//        if (supports16bit) m_maxBitDepth = 16;        
-//        
-//        LOGF_INFO("Camera supports %zu pixel formats. Max depth: %d",        
-//                  m_formatMap.size(), m_maxBitDepth);        
-//        LOG_INFO("=== queryPixelFormats() completed successfully ===");        
-//    }        
-//    catch (const std::exception &e)        
-//    {        
-//        LOGF_ERROR("Failed to query pixel formats: %s", e.what());        
-//        LOG_INFO("Setting fallback Mono8 format...");        
-//        // Explicit Constructor Call in catch block        
-//        m_formatMap["Mono8"] = PixelFormatInfo("Mono8", "Mono8", 8, false, false, nullptr);        
-//        m_supportedBitDepths.push_back(8);        
-//        m_maxBitDepth = 8;        
-//    }        
-//}
 
 void IDS_CCD::queryPixelFormats()          
 {          
@@ -2185,9 +2007,7 @@ void IDS_CCD::queryPixelFormats()
     LOG_INFO("after: m_supportedBitDepths.clear();");        
     m_compressionSupport.clear();          
     LOG_INFO("after: m_compressionSupport.clear();");          
-          
-    // Add missing variable declaration      
-    bool supportsCompression = false;          
+      
           
     try          
     {          
@@ -2255,7 +2075,6 @@ void IDS_CCD::queryPixelFormats()
                 else if (formatName == "Mono8p")          
                 {          
                     supports8bit = true;        
-                    supportsCompression = true;        
                     m_compressionSupport[8] = true;        
                     m_formatMap["Mono8_Packed"] = PixelFormatInfo(        
                         "Mono8p",           // idsName        
@@ -2286,7 +2105,6 @@ void IDS_CCD::queryPixelFormats()
                 else if (formatName == "Mono10p")          
                 {          
                     supports10bit = true;        
-                    supportsCompression = true;        
                     m_compressionSupport[10] = true;        
                     m_formatMap["Mono10_Packed"] = PixelFormatInfo(        
                         "Mono10p",           // idsName        
@@ -2319,7 +2137,6 @@ void IDS_CCD::queryPixelFormats()
                 else if (formatName == "Mono12p")          
                 {          
                     supports12bit = true;        
-                    supportsCompression = true;        
                     m_compressionSupport[12] = true;        
                     m_formatMap["Mono12_Packed"] = PixelFormatInfo(        
                         "Mono12p",           // idsName        
@@ -2490,13 +2307,11 @@ void IDS_CCD::allocateFrameBuffer()
       
     // Get current format and determine if it's Bayer  
     std::string currentFormat = "Mono8"; // default  
-    bool isBayer = false;  
       
     auto pixelFormatNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");  
     if (pixelFormatNode)  
     {  
         currentFormat = pixelFormatNode->CurrentEntry()->SymbolicValue();  
-        isBayer = (currentFormat.find("Bayer") != std::string::npos);  
     }  
       
     // Calculate buffer size using format map for all formats  
@@ -2866,7 +2681,6 @@ bool IDS_CCD::setupParams()
   
     try  
     {  
-        setupTemperatureSensor();
         updateTemperatureProperty();
           
         // Query sensor dimensions  
@@ -2922,13 +2736,9 @@ bool IDS_CCD::setupParams()
         // Create capture formats with descriptive labels    
         std::vector<PixelFormatInfo> captureFormats;  
         
-        // Use Bayer info already detected in queryCameraCapabilities()
-        bool hasBayer = m_hasBayer;
-        const std::string& bayerPattern = m_bayerPattern;
-
         LOGF_INFO("Using cached Bayer info: hasBayer=%s pattern=%s",
-                  hasBayer ? "true" : "false",
-                  bayerPattern.c_str()); 
+                  m_hasBayer ? "true" : "false",
+                  m_bayerPattern.c_str());
             
         // Add 8-bit formats    
         if (std::find(m_supportedBitDepths.begin(), m_supportedBitDepths.end(), 8) != m_supportedBitDepths.end())    
@@ -3093,23 +2903,7 @@ bool IDS_CCD::setupParams()
                 LOGF_ERROR("Failed to allocate buffers after format change: %s", e.what());
                 return false;
             }
-
-            // === RESTART ACQUISITION ===
-            try
-            {
-                dataStream->StartAcquisition(peak::core::AcquisitionStartMode::Default, 1);
-
-                if (acquisitionStartNode)
-                {
-                    acquisitionStartNode->Execute();
-                }
-            }
-            catch (const std::exception &e)
-            {
-                LOGF_ERROR("Failed to restart acquisition after format change: %s", e.what());
-                return false;
-            }   
-            
+           
             allocateFrameBuffer();  
             LOG_INFO("Frame buffer allocated after pixel format configuration");
         }        
@@ -3143,7 +2937,7 @@ bool IDS_CCD::setupParams()
   
         // Setup Gain if supported  
         LOG_INFO("=== Starting gain setup ===");    
-        HasGain = setupGainSelector();  
+        HasGain = selectGainChannel();  
         LOGF_INFO("Gain setup result: %s", HasGain ? "success" : "failed");   
   
         if (!HasGain)  
@@ -3153,12 +2947,12 @@ bool IDS_CCD::setupParams()
         }  
         else  
         {  
-            // Gain node already initialized & property already updated/set in setupGainSelector()  
+            // Gain node already initialized & property already updated/set in selectGainChannel()  
             // Nothing needed here — we've reused cached node and already populated GainNP  
             // Just ensure it's ready: (optional sanity check)  
             if (GainNP.getState() != IPS_OK)  
             {  
-                LOG_WARN("Gain property not properly initialized despite setupGainSelector() success.");  
+                LOG_WARN("Gain property not properly initialized despite selectGainChannel() success.");  
             }  
   
             // Initialize userset and exposure limits    
@@ -3249,7 +3043,8 @@ bool IDS_CCD::setupParams()
             {  
                 try  
                 {  
-                    auto blackLevelNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("BlackLevel");  
+                    if (!blackLevelNode)
+                        blackLevelNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("BlackLevel");
               
                     double minOffset     = blackLevelNode->Minimum();  
                     double maxOffset     = blackLevelNode->Maximum();  
