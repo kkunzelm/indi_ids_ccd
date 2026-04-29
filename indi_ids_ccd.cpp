@@ -13,42 +13,81 @@
 
 /** + * GLOBAL MULTI-CAMERA LOADER
  */
+/** 
+ * GLOBAL MULTI-CAMERA LOADER
+ */
+
 std::vector<std::unique_ptr<IDS_CCD>> idsCCDs;
+
 static bool sdkInitialized = false;
-static std::mutex sdkInitMutex;  
+
+// Protects SDK initialization and idsCCDs creation.
+static std::mutex sdkInitMutex;
+
+// Protects all access to idsCCDs while routing INDI callbacks.
+static std::mutex idsCCDsMutex;
+
 
 void ISGetProperties(const char *dev)
 {
+    {
+        std::lock_guard<std::mutex> initLock(sdkInitMutex);
+
         if (!sdkInitialized)
         {
             try
             {
                 peak::Library::Initialize();
+
                 auto &deviceManager = peak::DeviceManager::Instance();
                 deviceManager.Update();
-                
-                if (deviceManager.Devices().empty())  
-                {  
-                    IDLog("No IDS cameras found on the system.\n");  
-                    sdkInitialized = true; // Prevent retry on next call  
-                    return; // Exit early, no camera instances created  
-                }  
-    
-                for (const auto &deviceDescriptor : deviceManager.Devices())
+
+                if (deviceManager.Devices().empty())
                 {
-                    auto cam = std::make_unique<IDS_CCD>();
-    
-                    // Build unique name: "ModelName-SerialNumber"
-                    // e.g., "U3-31RxSE-M-4108771584"
-                    std::string model = deviceDescriptor->ModelName();
-                    std::string sn = deviceDescriptor->SerialNumber();
-                    std::string uniqueName = model + "-" + sn;
-    
-                    cam->setDeviceName(uniqueName.c_str());
-                    idsCCDs.push_back(std::move(cam));
-                    
-                    IDLog("Discovered camera: %s\n", uniqueName.c_str());
+                    IDLog("No IDS cameras found on the system.\n");
+
+                    // Do not set sdkInitialized=true here if you want a later retry
+                    // when a camera is plugged in after driver startup.
+                    return;
                 }
+
+                {
+                    std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+
+                    for (const auto &deviceDescriptor : deviceManager.Devices())
+                    {
+                        std::string model = deviceDescriptor->ModelName();
+                        std::string sn    = deviceDescriptor->SerialNumber();
+                        std::string uniqueName = model + "-" + sn;
+
+                        // Avoid duplicate camera objects if ISGetProperties is called again
+                        // after a partial initialization or retry.
+                        bool alreadyExists = false;
+
+                        for (const auto &cam : idsCCDs)
+                        {
+                            if (strcmp(cam->getDeviceName(), uniqueName.c_str()) == 0)
+                            {
+                                alreadyExists = true;
+                                break;
+                            }
+                        }
+
+                        if (alreadyExists)
+                        {
+                            IDLog("Camera already registered: %s\n", uniqueName.c_str());
+                            continue;
+                        }
+
+                        auto cam = std::make_unique<IDS_CCD>();
+                        cam->setDeviceName(uniqueName.c_str());
+
+                        idsCCDs.push_back(std::move(cam));
+
+                        IDLog("Discovered camera: %s\n", uniqueName.c_str());
+                    }
+                }
+
                 sdkInitialized = true;
             }
             catch (const std::exception &e)
@@ -56,64 +95,128 @@ void ISGetProperties(const char *dev)
                 IDLog("IDS SDK Initialization failed: %s\n", e.what());
             }
         }
-    
-        for (auto &cam : idsCCDs)
-            cam->ISGetProperties(dev); 
-}
+    }
 
-void ISNewSwitch(const char *dev, const char *name, ISState *states, char *names[], int n)  
-{  
-    for (auto &cam : idsCCDs)  
-    {  
-        if (strcmp(dev, cam->getDeviceName()) == 0)  
-        {  
-            cam->ISNewSwitch(dev, name, states, names, n);  
-            break;  
-        }  
-    }  
-}
+    std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
 
-void ISNewText(const char *dev, const char *name, char *texts[], char *names[], int n)
-{
     for (auto &cam : idsCCDs)
-        if (strcmp(dev, cam->getDeviceName()) == 0)  
-        {  
+    {
+        cam->ISGetProperties(dev);
+    }
+}
+
+
+void ISNewSwitch(const char *dev,
+                 const char *name,
+                 ISState *states,
+                 char *names[],
+                 int n)
+{
+    if (dev == nullptr)
+        return;
+
+    std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+
+    for (auto &cam : idsCCDs)
+    {
+        if (strcmp(dev, cam->getDeviceName()) == 0)
+        {
+            cam->ISNewSwitch(dev, name, states, names, n);
+            break;
+        }
+    }
+}
+
+
+void ISNewText(const char *dev,
+               const char *name,
+               char *texts[],
+               char *names[],
+               int n)
+{
+    if (dev == nullptr)
+        return;
+
+    std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+
+    for (auto &cam : idsCCDs)
+    {
+        if (strcmp(dev, cam->getDeviceName()) == 0)
+        {
             cam->ISNewText(dev, name, texts, names, n);
-            break;  
-        } 
+            break;
+        }
+    }
 }
 
-void ISNewNumber(const char *dev, const char *name, double values[], char *names[], int n)
+
+void ISNewNumber(const char *dev,
+                 const char *name,
+                 double values[],
+                 char *names[],
+                 int n)
 {
+    if (dev == nullptr)
+        return;
+
+    std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+
     for (auto &cam : idsCCDs)
-        if (strcmp(dev, cam->getDeviceName()) == 0)  
-        {  
+    {
+        if (strcmp(dev, cam->getDeviceName()) == 0)
+        {
             cam->ISNewNumber(dev, name, values, names, n);
-            break;  
-        }  
+            break;
+        }
+    }
 }
 
-void ISNewBLOB(const char *dev, const char *name, int sizes[], int blobsizes[], char *blobs[], char *formats[],
-               char *names[], int n)
+
+void ISNewBLOB(const char *dev,
+               const char *name,
+               int sizes[],
+               int blobsizes[],
+               char *blobs[],
+               char *formats[],
+               char *names[],
+               int n)
 {
+    if (dev == nullptr)
+        return;
+
+    std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+
     for (auto &cam : idsCCDs)
-        if (strcmp(dev, cam->getDeviceName()) == 0)  
-        {  
+    {
+        if (strcmp(dev, cam->getDeviceName()) == 0)
+        {
             cam->ISNewBLOB(dev, name, sizes, blobsizes, blobs, formats, names, n);
-            break;  
-        }  
+            break;
+        }
+    }
 }
 
-void ISSnoopDevice(XMLEle *root)  
-{  
-    const char *dev = findXMLAttValu(root, "device");  
-      
-    for (auto &cam : idsCCDs)  
-        if (strcmp(dev, cam->getDeviceName()) == 0)    
-        {    
-            cam->ISSnoopDevice(root);  
-            break;    
-        }    
+
+void ISSnoopDevice(XMLEle *root)
+{
+    if (root == nullptr)
+        return;
+
+    const char *dev = findXMLAttValu(root, "device");
+
+    if (dev == nullptr)
+        return;
+
+    std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+
+    for (auto &cam : idsCCDs)
+    {
+        if (strcmp(dev, cam->getDeviceName()) == 0)
+        {
+            cam->ISSnoopDevice(root);
+            break;
+        }
+    }
 }
 
 IDS_CCD::IDS_CCD()
@@ -130,86 +233,120 @@ IDS_CCD::~IDS_CCD()
     }  
 } 
 
-bool IDS_CCD::Connect()    
-{    
-    LOG_INFO("=== Starting Connect() ===");    
-        
-    if (!initCamera()) {    
-        LOG_ERROR("initCamera() failed");    
-        return false;    
-    }    
-    LOG_INFO("initCamera() completed successfully");    
-    
-    
-    // CRITICAL: Set capabilities AFTER camera initialization but BEFORE other setup  
-    // This ensures all capability flags are properly set before INDI exposes properties  
-    queryCameraCapabilities(); 
-        
-    if (!setupParams()) {    
-        LOG_ERROR("setupParams() failed");    
-        return false;    
-    }    
-    LOG_INFO("setupParams() completed successfully");  
-    
-    if (!queryExposureLimits()) {    
-        LOG_ERROR("queryExposureLimits() failed");    
-        return false;    
-    }    
-    LOG_INFO("queryExposureLimits() completed successfully");    
-        
-    // Start imaging thread  
-    m_ThreadRequest = StateIdle;  
-    m_ThreadState = StateNone;  
-    int stat = pthread_create(&m_ImagingThread, nullptr, &imagingHelper, this);  
-    if (stat != 0)  
-    {  
-        LOGF_ERROR("Error creating imaging thread (%d)", stat);  
-        return false;  
-    }  
-      
-    // Wait for thread to initialize  
-    pthread_mutex_lock(&condMutex);  
-    while (m_ThreadState == StateNone)  
-    {  
-        pthread_cond_wait(&cv, &condMutex);  
-    }  
-    pthread_mutex_unlock(&condMutex);  
-        
-    SetTimer(getCurrentPollingPeriod());  
-    LOG_INFO("=== Connect() completed successfully ===");    
-    return true;    
+bool IDS_CCD::Connect()
+{
+    LOG_INFO("=== Starting Connect() ===");
+
+    if (!initCamera())
+    {
+        LOG_ERROR("initCamera() failed");
+        cleanupConnection();
+        return false;
+    }
+
+    LOG_INFO("initCamera() completed successfully");
+
+    // CRITICAL: Set capabilities AFTER camera initialization but BEFORE other setup.
+    // This ensures all capability flags are properly set before INDI exposes properties.
+    queryCameraCapabilities();
+
+    if (!setupParams())
+    {
+        LOG_ERROR("setupParams() failed");
+        cleanupConnection();
+        return false;
+    }
+
+    LOG_INFO("setupParams() completed successfully");
+
+    if (!queryExposureLimits())
+    {
+        LOG_ERROR("queryExposureLimits() failed");
+        cleanupConnection();
+        return false;
+    }
+
+    LOG_INFO("queryExposureLimits() completed successfully");
+
+    // Start imaging thread.
+    pthread_mutex_lock(&condMutex);
+    m_ThreadRequest = StateIdle;
+    m_ThreadState   = StateNone;
+    pthread_mutex_unlock(&condMutex);
+
+    int stat = pthread_create(&m_ImagingThread, nullptr, &imagingHelper, this);
+
+    if (stat != 0)
+    {
+        LOGF_ERROR("Error creating imaging thread (%d)", stat);
+        cleanupConnection();
+        return false;
+    }
+
+    m_threadRunning = true;
+
+    // Wait for thread to initialize.
+    pthread_mutex_lock(&condMutex);
+
+    while (m_ThreadState == StateNone)
+    {
+        pthread_cond_wait(&cv, &condMutex);
+    }
+
+    pthread_mutex_unlock(&condMutex);
+
+    SetTimer(getCurrentPollingPeriod());
+
+    LOG_INFO("=== Connect() completed successfully ===");
+
+    return true;
 }
 
 
-bool IDS_CCD::Disconnect()  
-{  
-    ImageState tState;  
-    LOGF_DEBUG("Closing %s...", getDeviceName());  
-  
-    pthread_mutex_lock(&condMutex);  
-    tState = m_ThreadState;  
-    m_ThreadRequest = StateTerminate;  
-    pthread_cond_signal(&cv);  
-    pthread_mutex_unlock(&condMutex);  
-    pthread_join(m_ImagingThread, nullptr);  
-  
-    if (isConnected())  
-    {  
-        if (tState == StateExposure)  
-        {  
-            // Cancel any ongoing exposure  
-            try {  
-                acquisitionStopNode->Execute();  
-            } catch (...) {  
-                LOG_WARN("Could not stop exposure during disconnect");  
-            }  
-        }  
-        cleanupConnection();  
-    }  
-  
-    LOG_INFO("Camera is offline.");  
-    return true;  
-} 
+bool IDS_CCD::Disconnect()
+{
+    ImageState tState = StateNone;
+
+    LOGF_DEBUG("Closing %s...", getDeviceName());
+
+    if (m_threadRunning)
+    {
+        pthread_mutex_lock(&condMutex);
+
+        tState = m_ThreadState;
+        m_ThreadRequest = StateTerminate;
+
+        pthread_cond_broadcast(&cv);
+        pthread_mutex_unlock(&condMutex);
+
+        pthread_join(m_ImagingThread, nullptr);
+        m_threadRunning = false;
+    }
+
+    if (isConnected())
+    {
+        if (tState == StateExposure)
+        {
+            try
+            {
+                if (acquisitionStopNode && acquisitionStopNode->IsAvailable())
+                {
+                    acquisitionStopNode->Execute();
+                    acquisitionStopNode->WaitUntilDone();
+                }
+            }
+            catch (...)
+            {
+                LOG_WARN("Could not stop exposure during disconnect");
+            }
+        }
+
+        cleanupConnection();
+    }
+
+    LOG_INFO("Camera is offline.");
+    return true;
+}
 
 void IDS_CCD::ISGetProperties(const char *dev)  
 {  
@@ -221,7 +358,7 @@ void IDS_CCD::ISGetProperties(const char *dev)
 
 void IDS_CCD::cleanupConnection()
 {
-    if (InExposure)
+    if (InExposure.load() || m_isAcquiring.load())
     {
         AbortExposure();
     }
@@ -383,99 +520,151 @@ bool IDS_CCD::updateProperties()
     return true;      
 }
 
-bool IDS_CCD::initCamera()  
-{  
-    LOG_INFO("checkpoint: initCamera()");  
-  
-    try  
-    {  
-        // 1. Initialize the Library (Safe to call multiple times)
-        std::lock_guard<std::mutex> lock(sdkInitMutex);  
- 
-        auto &deviceManager = peak::DeviceManager::Instance();  
-        deviceManager.Update();  
-  
-        // 2. Multi-instance Hardware Matching
-        // We look for the device whose Model-Serial matches this instance's name
+bool IDS_CCD::initCamera()
+{
+    LOG_INFO("checkpoint: initCamera()");
+
+    try
+    {
+        // 1. Initialize the Library / refresh device manager safely
+        std::lock_guard<std::mutex> lock(sdkInitMutex);
+
+        auto &deviceManager = peak::DeviceManager::Instance();
+        deviceManager.Update();
+
+        // 2. Multi-instance hardware matching
+        // We look for the device whose Model-Serial matches this instance's name.
         std::string myName = getDeviceName();
         bool foundHardware = false;
 
         for (const auto &deviceDescriptor : deviceManager.Devices())
         {
-            // Construct the unique ID (Model-SerialNumber)
-            std::string dsName = deviceDescriptor->ModelName() + "-" + deviceDescriptor->SerialNumber();
-            
+            std::string dsName =
+                deviceDescriptor->ModelName() + "-" + deviceDescriptor->SerialNumber();
+
             if (dsName == myName)
             {
                 device = deviceDescriptor->OpenDevice(peak::core::DeviceAccessType::Control);
                 foundHardware = true;
-                LOGF_INFO("Instance %s successfully matched and opened hardware.", myName.c_str());
+
+                LOGF_INFO("Instance %s successfully matched and opened hardware.",
+                          myName.c_str());
                 break;
             }
         }
 
         if (!foundHardware || !device)
         {
-            LOGF_ERROR("Could not find/open specific hardware for instance: %s", myName.c_str());
+            LOGF_ERROR("Could not find/open specific hardware for instance: %s",
+                       myName.c_str());
             return false;
         }
 
-        // 3. Cache Node Maps
-        nodeMapRemoteDevice = device->RemoteDevice()->NodeMaps().at(0);  
+        // 3. Cache node map
+        nodeMapRemoteDevice = device->RemoteDevice()->NodeMaps().at(0);
 
-        // 4. Cache Critical Node Pointers (The "Contract" with the hardware)
-        pixelFormatNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");
-        widthNode       = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Width");
-        heightNode      = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Height");
-        
-        try {
-            exposureNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("ExposureTime");
-        } catch (...) {
-            exposureNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("ExposureTimeAbs");
+        if (!nodeMapRemoteDevice)
+        {
+            LOG_ERROR("Remote device node map is not available.");
+            return false;
         }
 
-        userSetNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("UserSetSelector");
+        // 4. Cache critical node pointers
+        pixelFormatNode =
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");
 
-        
-        try {  
-            acquisitionStartNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("AcquisitionStart");  
-            acquisitionStopNode  = nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("AcquisitionStop");  
-        } catch (...) {  
-            LOG_WARN("Acquisition Command nodes not found; continuing anyway.");  
+        widthNode =
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Width");
+
+        heightNode =
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Height");
+
+        try
+        {
+            exposureNode = findExposureNode();
+
+            if (!exposureNode)
+            {
+                LOG_ERROR("Exposure node could not be initialized.");
+                return false;
+            }
+
+            LOG_INFO("Exposure node initialized successfully.");
+        }
+        catch (const std::exception &e)
+        {
+            LOGF_ERROR("Failed to initialize exposure node: %s", e.what());
+            return false;
         }
 
-        // 5. Initialize Hardware-Specific Components
+        userSetNode =
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("UserSetSelector");
+
+        try
+        {
+            acquisitionStartNode =
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("AcquisitionStart");
+
+            acquisitionStopNode =
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("AcquisitionStop");
+        }
+        catch (const std::exception &e)
+        {
+            LOGF_WARN("Acquisition command nodes not found; continuing anyway: %s", e.what());
+        }
+
+        // 5. Initialize hardware-specific components
         setupTemperatureSensor();
-                 
-        // 6. Set Acquisition Mode
-        try {  
-            nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("AcquisitionMode")  
-                ->SetCurrentEntry("SingleFrame");  
-        } catch (const std::exception &e) {  
-            LOGF_WARN("Could not set SingleFrame mode: %s", e.what());  
-        }  
-  
-        // 7. DataStream and Buffer Allocation
-        dataStream = device->DataStreams().at(0)->OpenDataStream();  
-        auto payloadSize = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("PayloadSize")->Value();  
-  
-        for (uint64_t i = 0; i < dataStream->NumBuffersAnnouncedMinRequired(); ++i)  
-        {  
-            auto buffer = dataStream->AllocAndAnnounceBuffer(static_cast<size_t>(payloadSize), nullptr);  
-            dataStream->QueueBuffer(buffer);  
-        }  
-  
-        return true;  
-    }  
-    catch (const std::exception &e)  
-    {  
-        LOGF_ERROR("Exception during initCamera for %s: %s", getDeviceName(), e.what());  
-        return false;  
-    }  
+
+        // 6. Set acquisition mode
+        try
+        {
+            nodeMapRemoteDevice
+                ->FindNode<peak::core::nodes::EnumerationNode>("AcquisitionMode")
+                ->SetCurrentEntry("SingleFrame");
+        }
+        catch (const std::exception &e)
+        {
+            LOGF_WARN("Could not set SingleFrame mode: %s", e.what());
+        }
+
+        // 7. DataStream and buffer allocation
+        dataStream = device->DataStreams().at(0)->OpenDataStream();
+
+        payloadSizeNode =
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("PayloadSize");
+
+        const auto payloadSize = payloadSizeNode->Value();
+
+        if (payloadSize == 0)
+        {
+            LOG_ERROR("PayloadSize is zero during camera initialization.");
+            return false;
+        }
+
+        for (uint64_t i = 0; i < dataStream->NumBuffersAnnouncedMinRequired(); ++i)
+        {
+            auto buffer =
+                dataStream->AllocAndAnnounceBuffer(static_cast<size_t>(payloadSize), nullptr);
+
+            dataStream->QueueBuffer(buffer);
+        }
+
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        LOGF_ERROR("Exception during initCamera for %s: %s",
+                   getDeviceName(),
+                   e.what());
+        return false;
+    }
 }
 
 const char *IDS_CCD::getDefaultName()  
-{  
+{ 
+    std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+ 
     // If we have real cameras detected, don't create a default instance  
     if (!idsCCDs.empty())  
         return "";  // Empty name prevents default instance creation  
@@ -532,178 +721,230 @@ std::vector<std::string> IDS_CCD::queryAvailableUserSets()
     return userSets;    
 }
   
-void IDS_CCD::queryCameraCapabilities()      
-{     
-    // Reset all capability flags      
-    HasGain = false;      
-    HasOffset = false;      
-    uint32_t cap = CCD_CAN_ABORT | CCD_CAN_SUBFRAME;      
-          
-    // Check for gain control      
-    try       
-    {      
-        if (!gainNode)    
-            gainNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("Gain");    
-    
-        if (gainNode && gainNode->IsReadable())      
-        {      
-            HasGain = true;      
-                
-            // 1. Get values from SDK    
-            double minGain = gainNode->Minimum();      
-            double maxGain = gainNode->Maximum();      
-            double valGain = gainNode->Value();    
-            double stepGain = (maxGain - minGain) / 100.0; // 100 steps      
-    
-            // 2. Use the GainNP Property object methods    
-            // Note: No & before GainNP, and use [] followed by setters    
-            GainNP[0].setMin(minGain);      
-            GainNP[0].setMax(maxGain);      
-            GainNP[0].setStep(stepGain);     
-            GainNP[0].setValue(valGain);      
-    
-            LOGF_INFO("Camera supports gain: %.2f to %.2f", minGain, maxGain);      
-        }      
-    }      
-    catch (const std::exception &e)      
-    {      
-        LOGF_DEBUG("No gain control: %s", e.what());      
-    }    
-          
-    // Check for offset/black level control      
-    try      
-    {      
-        auto offsetNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("BlackLevel");      
-        if (offsetNode && offsetNode->IsReadable())      
-        {      
-            HasOffset = true;      
-            // Set offset range      
-            double minOffset = offsetNode->Minimum();      
-            double maxOffset = offsetNode->Maximum();      
-            OffsetNP[0].setMin(minOffset);      
-            OffsetNP[0].setMax(maxOffset);      
-            OffsetNP[0].setStep((maxOffset - minOffset) / 100.0);      
-            OffsetNP[0].setValue(offsetNode->Value());      
-            LOGF_INFO("Camera supports offset: %.2f to %.2f", minOffset, maxOffset);      
-        }      
-    }      
-    catch (const std::exception &e)      
-    {      
-        LOGF_DEBUG("No offset control: %s", e.what());      
-    }      
-          
-    // Centralized temperature check    
-    if (!HasTemperature)    
-     {    
-         LOG_INFO("Temperature sensor not available or not readable.");    
-     }    
-    else if (tempNode && tempNode->IsAvailable())    
-    {    
-        LOGF_INFO("Camera temperature sensor is active. Current: %.2f C", tempNode->Value());    
-        // Temperature sensor available, but cooler control is separate  
-    }    
-    
-    // Check for color/Bayer support  
-    try {  
-        auto pixelFormatNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");  
-        auto entries = pixelFormatNode->Entries();  
-          
-        for (const auto &entry : entries) {  
-            std::string entryName = entry->SymbolicValue();  
-              
-            if (entryName.find("Bayer") != std::string::npos &&   
-                entry->IsAvailable() && entry->IsWriteable()) {  
-                m_hasBayer = true;  
-                m_bayerPattern = mapCameraFormatToBayerPattern(entryName);  
-                  
-                if (!m_bayerPattern.empty()) {  
-                    LOGF_INFO("Found Bayer format: %s -> %s", entryName.c_str(), m_bayerPattern.c_str());  
-                    break; // Found first Bayer pattern  
-                }  
-            }  
-        }  
-          
-        if (m_hasBayer && !m_bayerPattern.empty()) {  
-            cap |= CCD_HAS_BAYER;  
-            LOGF_INFO("Camera supports Bayer pattern: %s", m_bayerPattern.c_str());  
-        }  
-    } catch (const std::exception &e) {  
-        LOGF_DEBUG("Error checking color support: %s", e.what());  
-    }   
-              
-    // Check for cooling control    
-    bool hasCooling = false;      
-    try      
-    {      
-        auto coolingNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("DeviceTemperatureControlMode");      
-        if (coolingNode && coolingNode->IsWriteable())      
-        {      
-            hasCooling = true;      
-            LOG_INFO("Camera supports cooling control");      
-        }      
-    }      
-    catch (const std::exception &e)      
-    {      
-        LOGF_DEBUG("No cooling control: %s", e.what());      
-    }      
-          
-    // Check for binning support      
-    try      
-    {      
-        auto binningNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("BinningHorizontal");      
-        if (binningNode && binningNode->IsWriteable())      
-        {      
-            int maxBin = binningNode->Maximum();      
-            if (maxBin > 1)      
-            {      
-                cap |= CCD_CAN_BIN;      
-                PrimaryCCD.setMinMaxStep("CCD_BINNING", "HOR_BIN", 1, maxBin, 1, false);      
-                PrimaryCCD.setMinMaxStep("CCD_BINNING", "VER_BIN", 1, maxBin, 1, false);      
-                LOGF_INFO("Camera supports binning up to %dx%d", maxBin, maxBin);      
-            }      
-        }      
-    }      
-    catch (const std::exception &e)      
-    {      
-        LOGF_DEBUG("No binning control: %s", e.what());      
-    }      
-          
-    // Get sensor info      
-    try      
-    {      
-        if (!widthNode) widthNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Width");    
-        if (!heightNode) heightNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Height");    
-    
-        auto pixelSizeNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("PixelSize");      
-              
-        if (widthNode && heightNode)      
-        {      
-            cameraWidth = widthNode->Maximum();      
-            cameraHeight = heightNode->Maximum();      
-            SetCCDParams(cameraWidth, cameraHeight, cameraBPP, pixelSizeX, pixelSizeY);      
-            LOGF_INFO("Sensor size: %dx%d", cameraWidth, cameraHeight);      
-        }      
-              
-        if (pixelSizeNode)      
-        {      
-            pixelSizeX = pixelSizeNode->Value();      
-            pixelSizeY = pixelSizeNode->Value();      
-            LOGF_INFO("Pixel size: %.2f μm", pixelSizeX);      
-        }      
-    }      
-    catch (const std::exception &e)      
-    {      
-        LOGF_DEBUG("Error getting sensor info: %s", e.what());      
-    }      
-          
-    // Add cooler capability if cooling control is available  
-    if (hasCooling) {  
-        cap |= CCD_HAS_COOLER;  
-    }  
-          
-    // Set final capabilities      
-    SetCCDCapability(cap);      
-    LOGF_INFO("Final CCD capabilities: 0x%08X", cap);     
+void IDS_CCD::queryCameraCapabilities()
+{
+    // Reset all capability flags
+    HasGain = false;
+    HasOffset = false;
+    m_hasBayer = false;
+    m_bayerPattern.clear();
+
+    uint32_t cap = CCD_CAN_ABORT | CCD_CAN_SUBFRAME;
+
+    // Check for gain control
+    try
+    {
+        if (!gainNode)
+            gainNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("Gain");
+
+        if (gainNode && gainNode->IsReadable())
+        {
+            HasGain = true;
+
+            const double minGain = gainNode->Minimum();
+            const double maxGain = gainNode->Maximum();
+            const double valGain = gainNode->Value();
+
+            double stepGain = 1.0;
+            if (gainNode->HasConstantIncrement())
+                stepGain = gainNode->Increment();
+            else if (maxGain > minGain)
+                stepGain = (maxGain - minGain) / 100.0;
+
+            GainNP[0].setMin(minGain);
+            GainNP[0].setMax(maxGain);
+            GainNP[0].setStep(stepGain);
+            GainNP[0].setValue(valGain);
+
+            LOGF_INFO("Camera supports gain: %.2f to %.2f", minGain, maxGain);
+        }
+    }
+    catch (const std::exception &e)
+    {
+        LOGF_DEBUG("No gain control: %s", e.what());
+    }
+
+    // Check for offset / black level control
+    try
+    {
+        if (!blackLevelNode)
+            blackLevelNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("BlackLevel");
+
+        if (blackLevelNode && blackLevelNode->IsReadable())
+        {
+            HasOffset = true;
+
+            const double minOffset = blackLevelNode->Minimum();
+            const double maxOffset = blackLevelNode->Maximum();
+            const double valOffset = blackLevelNode->Value();
+
+            double stepOffset = 1.0;
+            if (blackLevelNode->HasConstantIncrement())
+                stepOffset = blackLevelNode->Increment();
+            else if (maxOffset > minOffset)
+                stepOffset = (maxOffset - minOffset) / 100.0;
+
+            OffsetNP[0].setMin(minOffset);
+            OffsetNP[0].setMax(maxOffset);
+            OffsetNP[0].setStep(stepOffset);
+            OffsetNP[0].setValue(valOffset);
+
+            LOGF_INFO("Camera supports offset: %.2f to %.2f", minOffset, maxOffset);
+        }
+    }
+    catch (const std::exception &e)
+    {
+        LOGF_DEBUG("No offset control: %s", e.what());
+    }
+
+    // Centralized temperature check
+    if (!HasTemperature)
+    {
+        LOG_INFO("Temperature sensor not available or not readable.");
+    }
+    else if (tempNode && tempNode->IsAvailable())
+    {
+        try
+        {
+            LOGF_INFO("Camera temperature sensor is active. Current: %.2f C",
+                      tempNode->Value());
+        }
+        catch (const std::exception &e)
+        {
+            LOGF_DEBUG("Could not read temperature during capability query: %s", e.what());
+        }
+    }
+
+    // Check for color / Bayer support
+    try
+    {
+        if (!pixelFormatNode)
+        {
+            pixelFormatNode =
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");
+        }
+
+        auto entries = pixelFormatNode->Entries();
+
+        for (const auto &entry : entries)
+        {
+            if (!entry->IsAvailable())
+                continue;
+
+            const std::string entryName = entry->SymbolicValue();
+
+            if (entryName.find("Bayer") != std::string::npos)
+            {
+                const std::string pattern = mapCameraFormatToBayerPattern(entryName);
+
+                if (!pattern.empty())
+                {
+                    m_hasBayer = true;
+                    m_bayerPattern = pattern;
+
+                    LOGF_INFO("Found Bayer format: %s -> %s",
+                              entryName.c_str(),
+                              m_bayerPattern.c_str());
+
+                    break;
+                }
+            }
+        }
+
+        if (m_hasBayer && !m_bayerPattern.empty())
+        {
+            cap |= CCD_HAS_BAYER;
+            LOGF_INFO("Camera supports Bayer pattern: %s", m_bayerPattern.c_str());
+        }
+    }
+    catch (const std::exception &e)
+    {
+        LOGF_DEBUG("Error checking color support: %s", e.what());
+    }
+
+    // Check for cooling control
+    bool hasCooling = false;
+
+    try
+    {
+        auto coolingNode =
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>(
+                "DeviceTemperatureControlMode");
+
+        if (coolingNode && coolingNode->IsWriteable())
+        {
+            hasCooling = true;
+            LOG_INFO("Camera supports cooling control");
+        }
+    }
+    catch (const std::exception &e)
+    {
+        LOGF_DEBUG("No cooling control: %s", e.what());
+    }
+
+    // Check for binning support
+    try
+    {
+        auto binningNode =
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("BinningHorizontal");
+
+        if (binningNode && binningNode->IsWriteable())
+        {
+            const int maxBin = static_cast<int>(binningNode->Maximum());
+
+            if (maxBin > 1)
+            {
+                cap |= CCD_CAN_BIN;
+
+                PrimaryCCD.setMinMaxStep("CCD_BINNING", "HOR_BIN",
+                                         1, maxBin, 1, false);
+
+                PrimaryCCD.setMinMaxStep("CCD_BINNING", "VER_BIN",
+                                         1, maxBin, 1, false);
+
+                LOGF_INFO("Camera supports binning up to %dx%d", maxBin, maxBin);
+            }
+        }
+    }
+    catch (const std::exception &e)
+    {
+        LOGF_DEBUG("No binning control: %s", e.what());
+    }
+
+    // Get basic sensor size only.
+    // Do NOT call SetCCDParams() here, because pixel size and final BPP may not
+    // be known yet. setupParams() will call SetCCDParams() once all values are valid.
+    try
+    {
+        if (!widthNode)
+            widthNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Width");
+
+        if (!heightNode)
+            heightNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Height");
+
+        if (widthNode && heightNode)
+        {
+            cameraWidth = static_cast<int>(widthNode->Maximum());
+            cameraHeight = static_cast<int>(heightNode->Maximum());
+
+            LOGF_INFO("Sensor size: %dx%d", cameraWidth, cameraHeight);
+        }
+    }
+    catch (const std::exception &e)
+    {
+        LOGF_DEBUG("Error getting sensor info: %s", e.what());
+    }
+
+    // Add cooler capability if cooling control is available
+    if (hasCooling)
+    {
+        cap |= CCD_HAS_COOLER;
+    }
+
+    // Set final capabilities
+    SetCCDCapability(cap);
+
+    LOGF_INFO("Final CCD capabilities: 0x%08X", cap);
 }
 
 bool IDS_CCD::configureExposure(float duration)  
@@ -752,7 +993,7 @@ bool IDS_CCD::configureExposure(float duration)
 
 bool IDS_CCD::startAcquisition()
 {
-    if (m_isAcquiring)
+    if (m_isAcquiring.load())
     {
         LOG_WARN("Acquisition already in progress.");
         return true;
@@ -766,21 +1007,20 @@ bool IDS_CCD::startAcquisition()
 
     try
     {
-        // 1. Start the software stream for one frame
+        // 1. Start the software stream for one frame.
         dataStream->StartAcquisition(peak::core::AcquisitionStartMode::Default, 1);
 
-        // 2. Start the camera hardware
-        if (acquisitionStartNode && acquisitionStartNode->IsAvailable())
-        {
-            acquisitionStartNode->Execute();
-        }
-        else
+        // 2. Start the camera hardware.
+        if (!acquisitionStartNode || !acquisitionStartNode->IsAvailable())
         {
             throw std::runtime_error("AcquisitionStart node not available");
         }
 
-        m_isAcquiring = true;
-        InExposure = true;
+        acquisitionStartNode->Execute();
+        acquisitionStartNode->WaitUntilDone();
+
+        m_isAcquiring.store(true);
+        InExposure.store(true);
 
         LOG_DEBUG("Acquisition started.");
         return true;
@@ -788,49 +1028,124 @@ bool IDS_CCD::startAcquisition()
     catch (const std::exception &ex)
     {
         LOGF_ERROR("Error starting acquisition: %s", ex.what());
-        m_isAcquiring = false;
-        InExposure = false;
+
+        // If the software stream started but the camera start failed,
+        // stop and flush the stream so the next exposure starts cleanly.
+        if (dataStream)
+        {
+            try
+            {
+                if (dataStream->IsGrabbing())
+                {
+                    dataStream->StopAcquisition(peak::core::AcquisitionStopMode::Default);
+                    LOG_DEBUG("Stopped data stream after failed acquisition start.");
+                }
+            }
+            catch (const std::exception &e)
+            {
+                LOGF_WARN("Could not stop data stream after failed acquisition start: %s", e.what());
+            }
+            catch (...)
+            {
+                LOG_WARN("Could not stop data stream after failed acquisition start.");
+            }
+
+            try
+            {
+                dataStream->Flush(peak::core::DataStreamFlushMode::DiscardAll);
+                LOG_DEBUG("Flushed data stream after failed acquisition start.");
+            }
+            catch (const std::exception &e)
+            {
+                LOGF_WARN("Could not flush data stream after failed acquisition start: %s", e.what());
+            }
+            catch (...)
+            {
+                LOG_WARN("Could not flush data stream after failed acquisition start.");
+            }
+
+            // Requeue announced buffers after flushing, so the next start has buffers.
+            try
+            {
+                for (auto &buffer : dataStream->AnnouncedBuffers())
+                {
+                    try
+                    {
+                        dataStream->QueueBuffer(buffer);
+                    }
+                    catch (...)
+                    {
+                        // Ignore buffers the SDK refuses to requeue.
+                    }
+                }
+            }
+            catch (const std::exception &e)
+            {
+                LOGF_WARN("Could not requeue buffers after failed acquisition start: %s", e.what());
+            }
+        }
+
+        m_isAcquiring.store(false);
+        InExposure.store(false);
+
         return false;
     }
 }
 
 bool IDS_CCD::stopAcquisition()
 {
-    if (!m_isAcquiring) {
+    if (!m_isAcquiring.load())
+    {
         LOG_DEBUG("Acquisition not running; skipping stop.");
         return true;
     }
 
-    try {
-        // 1. Tell the hardware DEVICE to stop generating frames
-        auto stopNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("AcquisitionStop");
-        if (stopNode && stopNode->IsAvailable()) {
-            stopNode->Execute();
-            stopNode->WaitUntilDone();
+    try
+    {
+        // 1. Tell the hardware device to stop generating frames
+        if (acquisitionStopNode && acquisitionStopNode->IsAvailable())
+        {
+            acquisitionStopNode->Execute();
+            acquisitionStopNode->WaitUntilDone();
+        }
+        else if (nodeMapRemoteDevice)
+        {
+            auto stopNode =
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("AcquisitionStop");
+
+            if (stopNode && stopNode->IsAvailable())
+            {
+                stopNode->Execute();
+                stopNode->WaitUntilDone();
+            }
         }
 
-        // 2. Tell the SOFTWARE stream to stop receiving
-        if (dataStream) {
+        // 2. Tell the software stream to stop receiving
+        if (dataStream)
+        {
             dataStream->StopAcquisition();
         }
 
-        InExposure = false;
-        m_isAcquiring = false;
+        InExposure.store(false);
+        m_isAcquiring.store(false);
 
         LOG_DEBUG("Acquisition and stream stopped successfully.");
         return true;
-
-    } catch (const std::exception& ex) {
+    }
+    catch (const std::exception &ex)
+    {
         LOGF_ERROR("Error during graceful stop: %s", ex.what());
-        m_isAcquiring = false;
-        InExposure = false;
+
+        InExposure.store(false);
+        m_isAcquiring.store(false);
+
         return false;
     }
 }
 
 bool IDS_CCD::StartExposure(float duration)
 {
-    if (InExposure || m_isAcquiring)
+    if (InExposure.load() || m_isAcquiring.load())
     {
         LOG_ERROR("Exposure already in progress. Abort current exposure first.");
         return false;
@@ -878,11 +1193,11 @@ bool IDS_CCD::StartExposure(float duration)
         }
     }
 
-    // Store exposure request for timing thread
-    m_ExposureRequest = duration;
-
-    // Set exposure start time immediately before starting acquisition
-    gettimeofday(&ExpStart, nullptr);
+    {
+        std::lock_guard<std::mutex> lock(exposureStateMutex);
+        m_ExposureRequest = static_cast<double>(duration);
+        gettimeofday(&ExpStart, nullptr);
+    }
 
     PrimaryCCD.setExposureDuration(duration);
     PrimaryCCD.setExposureLeft(duration);
@@ -899,7 +1214,7 @@ bool IDS_CCD::StartExposure(float duration)
     // Signal imaging thread to handle exposure monitoring
     pthread_mutex_lock(&condMutex);
     m_ThreadRequest = StateExposure;
-    pthread_cond_signal(&cv);
+    pthread_cond_broadcast(&cv);
     pthread_mutex_unlock(&condMutex);
 
     SetTimer(getCurrentPollingPeriod());
@@ -955,82 +1270,112 @@ void *IDS_CCD::imagingHelper(void *context)
     return static_cast<IDS_CCD *>(context)->imagingThreadEntry();  
 }  
   
-void *IDS_CCD::imagingThreadEntry()  
-{  
-    pthread_mutex_lock(&condMutex);  
-    m_ThreadState = StateIdle;  
-    pthread_cond_signal(&cv);  
-    while (true)  
-    {  
-        while (m_ThreadRequest == StateIdle)  
-        {  
-            pthread_cond_wait(&cv, &condMutex);  
-        }  
-        m_ThreadState = m_ThreadRequest;  
-        if (m_ThreadRequest == StateExposure)  
-        {  
-            getExposure();  
-        }  
-        else if (m_ThreadRequest == StateTerminate)  
-        {  
-            break;  
-        }  
-        else  
-        {  
-            m_ThreadRequest = StateIdle;  
-            pthread_cond_signal(&cv);  
-        }  
-        m_ThreadState = StateIdle;  
-    }  
-    m_ThreadState = StateTerminated;  
-    pthread_cond_signal(&cv);  
-    pthread_mutex_unlock(&condMutex);  
-  
-    return nullptr;  
-}  
+void *IDS_CCD::imagingThreadEntry()
+{
+    pthread_mutex_lock(&condMutex);
 
-void IDS_CCD::getExposure()    
-{    
-    pthread_mutex_unlock(&condMutex);    
-    usleep(10000);  // Small delay to let exposure start    
-    pthread_mutex_lock(&condMutex);    
-    
-    while (m_ThreadRequest == StateExposure)    
-    {    
-        pthread_mutex_unlock(&condMutex);    
-            
-        // Use CalcTimeLeft() for cleaner time calculation  
-        double timeleft = static_cast<double>(CalcTimeLeft());    
-            
-        uint32_t uSecs = 100000;    
-        if (timeleft > 1.1)    
-        {    
-            timeleft = round(timeleft);    
-            uSecs = 1000000;    
-        }    
-    
-        if (timeleft >= 0)    
-        {    
-            PrimaryCCD.setExposureLeft(timeleft);    
-        }    
-        else    
-        {    
-            InExposure = false;    
-            PrimaryCCD.setExposureLeft(0.0);    
-            if (m_ExposureRequest * 1000 > 5 * getCurrentPollingPeriod())    
-                DEBUG(INDI::Logger::DBG_SESSION, "Exposure done, downloading image...");    
-                
-            pthread_mutex_lock(&condMutex);    
-            exposureSetRequest(StateIdle);    
-            pthread_mutex_unlock(&condMutex);    
-            grabImage();    
-            pthread_mutex_lock(&condMutex);    
-            break;    
-        }    
-            
-        usleep(uSecs);    
-        pthread_mutex_lock(&condMutex);    
-    }    
+    m_ThreadState = StateIdle;
+    pthread_cond_broadcast(&cv);
+
+    while (true)
+    {
+        while (m_ThreadRequest == StateIdle)
+        {
+            pthread_cond_wait(&cv, &condMutex);
+        }
+
+        m_ThreadState = m_ThreadRequest;
+        pthread_cond_broadcast(&cv);
+
+        if (m_ThreadRequest == StateExposure)
+        {
+            getExposure();
+
+            m_ThreadState = StateIdle;
+            pthread_cond_broadcast(&cv);
+        }
+        else if (m_ThreadRequest == StateAbort)
+        {
+            m_ThreadRequest = StateIdle;
+            m_ThreadState = StateIdle;
+            pthread_cond_broadcast(&cv);
+        }
+        else if (m_ThreadRequest == StateTerminate)
+        {
+            break;
+        }
+        else
+        {
+            m_ThreadRequest = StateIdle;
+            m_ThreadState = StateIdle;
+            pthread_cond_broadcast(&cv);
+        }
+    }
+
+    m_ThreadState = StateTerminated;
+    pthread_cond_broadcast(&cv);
+
+    pthread_mutex_unlock(&condMutex);
+    return nullptr;
+} 
+
+void IDS_CCD::getExposure()
+{
+    pthread_mutex_unlock(&condMutex);
+
+    usleep(10000);  // Small delay to let exposure start
+
+    pthread_mutex_lock(&condMutex);
+
+    while (m_ThreadRequest == StateExposure)
+    {
+        pthread_mutex_unlock(&condMutex);
+
+        double timeleft = static_cast<double>(CalcTimeLeft());
+
+        uint32_t uSecs = 100000;
+
+        if (timeleft > 1.1)
+        {
+            timeleft = round(timeleft);
+            uSecs = 1000000;
+        }
+
+        if (timeleft >= 0)
+        {
+            PrimaryCCD.setExposureLeft(timeleft);
+        }
+        else
+        {
+            InExposure.store(false);
+            PrimaryCCD.setExposureLeft(0.0);
+
+            double exposureRequest = 0.0;
+            {
+                std::lock_guard<std::mutex> lock(exposureStateMutex);
+                exposureRequest = m_ExposureRequest;
+            }
+
+            if (exposureRequest * 1000 > 5 * getCurrentPollingPeriod())
+                DEBUG(INDI::Logger::DBG_SESSION, "Exposure done, downloading image...");
+
+            pthread_mutex_lock(&condMutex);
+            exposureSetRequest(StateIdle);
+            pthread_cond_broadcast(&cv);
+            pthread_mutex_unlock(&condMutex);
+
+            grabImage();
+
+            pthread_mutex_lock(&condMutex);
+            break;
+        }
+
+        usleep(uSecs);
+
+        pthread_mutex_lock(&condMutex);
+    }
+
+    pthread_cond_broadcast(&cv);
 }
 
 void IDS_CCD::exposureSetRequest(ImageState request)  
@@ -1041,75 +1386,145 @@ void IDS_CCD::exposureSetRequest(ImageState request)
     }  
 }
 
-bool IDS_CCD::AbortExposure()  
-{  
-    if (!InExposure && !m_isAcquiring)  
-    {  
-        return true;  
-    }  
-  
-    LOG_DEBUG("Aborting camera exposure...");  
-  
-    // Signal imaging thread to abort  
-    pthread_mutex_lock(&condMutex);  
-    m_ThreadRequest = StateAbort;  
-    pthread_cond_signal(&cv);  
-    while (m_ThreadState == StateExposure)  
-    {  
-        pthread_cond_wait(&cv, &condMutex);  
-    }  
-    pthread_mutex_unlock(&condMutex);  
-  
-    try  
-    {  
-        // 1. Hard reset of the hardware sensor state  
-        auto abortNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("AcquisitionAbort");  
-        if (abortNode && abortNode->IsAvailable()) {  
-            abortNode->Execute();  
-            abortNode->WaitUntilDone();  
-        }  
-  
-        // 2. Kill the data stream and discard any partial buffers  
-        if (dataStream) {  
-            dataStream->StopAcquisition(peak::core::AcquisitionStopMode::Default);  
-            dataStream->Flush(peak::core::DataStreamFlushMode::DiscardAll);  
-        }  
-          
-        LOG_INFO("Hardware and stream aborted.");  
-    }  
-    catch (const std::exception &e)  
-    {  
-        LOGF_ERROR("Failed to abort exposure: %s", e.what());  
-    }  
-  
-    // Always reset states regardless of catch  
-    InExposure = false;  
-    m_isAcquiring = false;  
-    return true;  
+bool IDS_CCD::AbortExposure()
+{
+    if (!InExposure.load() && !m_isAcquiring.load())
+    {
+        return true;
+    }
+
+    LOG_DEBUG("Aborting camera exposure...");
+
+    // Signal imaging thread to abort exposure monitoring.
+    pthread_mutex_lock(&condMutex);
+
+    m_ThreadRequest = StateAbort;
+    pthread_cond_broadcast(&cv);
+
+    while (m_ThreadState == StateExposure)
+    {
+        pthread_cond_wait(&cv, &condMutex);
+    }
+
+    pthread_mutex_unlock(&condMutex);
+
+    try
+    {
+        // 1. Ask the camera hardware to abort the acquisition if supported.
+        if (nodeMapRemoteDevice)
+        {
+            try
+            {
+                auto abortNode =
+                    nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("AcquisitionAbort");
+
+                if (abortNode && abortNode->IsAvailable())
+                {
+                    abortNode->Execute();
+                    abortNode->WaitUntilDone();
+                    LOG_DEBUG("AcquisitionAbort command executed.");
+                }
+            }
+            catch (const std::exception &e)
+            {
+                LOGF_DEBUG("AcquisitionAbort node not available or failed: %s", e.what());
+            }
+        }
+
+        // 2. Stop, flush, and requeue stream buffers.
+        if (dataStream)
+        {
+            try
+            {
+                if (dataStream->IsGrabbing())
+                {
+                    dataStream->StopAcquisition(peak::core::AcquisitionStopMode::Default);
+                    LOG_DEBUG("Data stream stopped during abort.");
+                }
+            }
+            catch (const std::exception &e)
+            {
+                LOGF_DEBUG("StopAcquisition during abort failed: %s", e.what());
+            }
+
+            try
+            {
+                dataStream->Flush(peak::core::DataStreamFlushMode::DiscardAll);
+                LOG_DEBUG("Data stream flushed during abort.");
+            }
+            catch (const std::exception &e)
+            {
+                LOGF_DEBUG("DataStream flush during abort failed: %s", e.what());
+            }
+
+            // Requeue all announced buffers so the next exposure has buffers available.
+            // Some SDK states may reject buffers that are already queued; ignore those.
+            try
+            {
+                size_t requeuedCount = 0;
+
+                for (auto &buffer : dataStream->AnnouncedBuffers())
+                {
+                    try
+                    {
+                        dataStream->QueueBuffer(buffer);
+                        ++requeuedCount;
+                    }
+                    catch (const std::exception &e)
+                    {
+                        LOGF_DEBUG("QueueBuffer after abort skipped/failed: %s", e.what());
+                    }
+                    catch (...)
+                    {
+                        LOG_DEBUG("QueueBuffer after abort skipped/failed with unknown error.");
+                    }
+                }
+
+                LOGF_DEBUG("Requeued %zu announced buffers after abort.", requeuedCount);
+            }
+            catch (const std::exception &e)
+            {
+                LOGF_DEBUG("Could not enumerate/requeue buffers after abort: %s", e.what());
+            }
+        }
+
+        LOG_INFO("Hardware and stream aborted.");
+    }
+    catch (const std::exception &e)
+    {
+        LOGF_ERROR("Failed to abort exposure: %s", e.what());
+    }
+
+    InExposure.store(false);
+    m_isAcquiring.store(false);
+    PrimaryCCD.setExposureLeft(0.0);
+
+    return true;
 }
 
 float IDS_CCD::CalcTimeLeft()
 {
-    struct timeval now;
+    struct timeval start {};
+    double request = 0.0;
+
+    {
+        std::lock_guard<std::mutex> lock(exposureStateMutex);
+        start = ExpStart;
+        request = m_ExposureRequest;
+    }
+
+    struct timeval now {};
     gettimeofday(&now, nullptr);
-    
-    // Calculate start time in SECONDS
-    double time_start_sec = 
-        static_cast<double>(ExpStart.tv_sec) + 
-        static_cast<double>(ExpStart.tv_usec) / IDSConstants::MICROSECONDS_PER_SECOND;
 
-    // Calculate current time in SECONDS
-    double time_now_sec = 
-        static_cast<double>(now.tv_sec) + 
+    const double time_start_sec =
+        static_cast<double>(start.tv_sec) +
+        static_cast<double>(start.tv_usec) / IDSConstants::MICROSECONDS_PER_SECOND;
+
+    const double time_now_sec =
+        static_cast<double>(now.tv_sec) +
         static_cast<double>(now.tv_usec) / IDSConstants::MICROSECONDS_PER_SECOND;
-    
-    // Calculate the difference in SECONDS
-    double timesince = time_now_sec - time_start_sec; 
-    
-    // ExposureRequest is in seconds, timesince is in seconds.
-    // The result is the remaining exposure time in SECONDS.
-    return static_cast<float>(m_ExposureRequest - timesince);
 
+    return static_cast<float>(request - (time_now_sec - time_start_sec));
 }
 
 
@@ -1118,95 +1533,154 @@ void IDS_CCD::TimerHit()
     if (!isConnected())
         return;
 
-    if (InExposure)
+    if (InExposure.load())
     {
         const float timeLeft = CalcTimeLeft();
         PrimaryCCD.setExposureLeft(std::max(0.0f, timeLeft));
     }
 
+    updateTemperatureProperty();
+
     SetTimer(getCurrentPollingPeriod());
 }
 
-int IDS_CCD::grabImage()  
-{  
-    std::unique_lock<std::mutex> guard(ccdBufferLock);  
-  
-    try  
-    {  
-        // 1. Wait for the buffer from the camera  
-        auto buffer = dataStream->WaitForFinishedBuffer(5000);  
-        peak::ipl::Image image = peak::BufferTo<peak::ipl::Image>(buffer);  
-  
-        InExposure = false;  
-  
-        // 3. Extract dimensions and format from cached nodes  
-        uint32_t imgWidth  = static_cast<uint32_t>(widthNode->Value());  
-        uint32_t imgHeight = static_cast<uint32_t>(heightNode->Value());  
-        std::string currentFormat = pixelFormatNode->CurrentEntry()->SymbolicValue();  
-  
-        LOGF_DEBUG("grabImage(): Processing %ux%u in format %s", imgWidth, imgHeight, currentFormat.c_str());  
-  
-        // 4. Look up format info in the map  
-        auto it = m_formatMap.find(currentFormat);  
-        if (it == m_formatMap.end())  
-        {  
-            LOGF_ERROR("Unsupported pixel format: %s", currentFormat.c_str());  
-            stopAcquisition();  
-            dataStream->QueueBuffer(buffer);  
-            return false;  
-        }  
-  
-        PixelFormatInfo &fmtInfo = it->second;  
-        uint8_t *src = static_cast<uint8_t *>(image.Data());  
-        uint8_t *dst = PrimaryCCD.getFrameBuffer();  
-        
-        size_t expectedSize = (fmtInfo.bitsPerPixel / 8) * imgWidth * imgHeight;  
-  
-        if (!dst || expectedSize == 0) {  
-            LOGF_ERROR("Invalid buffer: dst=%p, expectedSize=%zu", dst, expectedSize);  
-            stopAcquisition();  
-            dataStream->QueueBuffer(buffer);  
-            return false;  
-        }  
-          
-        LOGF_DEBUG("Processing image: %ux%u, %u bpp, buffer size: %zu",   
-                   imgWidth, imgHeight, fmtInfo.bitsPerPixel, expectedSize);  
+int IDS_CCD::grabImage()
+{
+    std::unique_lock<std::mutex> guard(ccdBufferLock);
 
-        
-  
-        // 5. Apply Conversion/Expansion via the Map  
-        if (fmtInfo.expandFunc)  
-        {  
-            // This calls the lambda/member function (expand10bit, expand12bit, or direct memcpy)  
-            fmtInfo.expandFunc(src, dst, imgWidth, imgHeight);  
-        }  
-        else  
-        {  
-            // Fallback safety for unpacked formats if expandFunc wasn't assigned  
-            size_t size = (fmtInfo.bitsPerPixel / 8) * imgWidth * imgHeight;  
-            memcpy(dst, src, size);  
-        }  
-  
-        LOGF_DEBUG("Calling ExposureComplete with buffer at %p, size %zu",   
-           dst, expectedSize);  
-  
-        // 6. Finalize INDI state  
-        PrimaryCCD.setBPP(fmtInfo.bitsPerPixel);  
-          
-        stopAcquisition();  
-        ExposureComplete(&PrimaryCCD);  
-        dataStream->QueueBuffer(buffer);  
-  
-        LOGF_INFO("Image captured and processed: %ux%u at %u bpp", imgWidth, imgHeight, fmtInfo.bitsPerPixel);  
-  
-        return true;  
-    }  
-    catch (const std::exception &e)  
-    {  
-        LOGF_ERROR("Failed to grab image: %s", e.what());  
-        try { stopAcquisition(); } catch (...) {}  
-        return false;  
-    }  
+    try
+    {
+        if (!dataStream)
+        {
+            LOG_ERROR("Cannot grab image: data stream is not initialized.");
+            return false;
+        }
+
+        // 1. Wait for the buffer from the camera
+        auto buffer = dataStream->WaitForFinishedBuffer(5000);
+        peak::ipl::Image image = peak::BufferTo<peak::ipl::Image>(buffer);
+
+        InExposure.store(false);
+
+        // 2. Extract dimensions and format from cached nodes
+        uint32_t imgWidth  = static_cast<uint32_t>(widthNode->Value());
+        uint32_t imgHeight = static_cast<uint32_t>(heightNode->Value());
+
+        std::string currentFormat =
+            pixelFormatNode->CurrentEntry()->SymbolicValue();
+
+        LOGF_DEBUG("grabImage(): Processing %ux%u in format %s",
+                   imgWidth,
+                   imgHeight,
+                   currentFormat.c_str());
+
+        // 3. Look up format info in the map
+        auto it = m_formatMap.find(currentFormat);
+
+        if (it == m_formatMap.end())
+        {
+            LOGF_ERROR("Unsupported pixel format: %s", currentFormat.c_str());
+
+            stopAcquisition();
+
+            try
+            {
+                dataStream->QueueBuffer(buffer);
+            }
+            catch (...)
+            {
+                LOG_WARN("Could not requeue buffer after unsupported format.");
+            }
+
+            return false;
+        }
+
+        PixelFormatInfo &fmtInfo = it->second;
+
+        uint8_t *src = static_cast<uint8_t *>(image.Data());
+        uint8_t *dst = PrimaryCCD.getFrameBuffer();
+
+        size_t expectedSize = (fmtInfo.bitsPerPixel / 8) * imgWidth * imgHeight;
+
+        if (!dst || expectedSize == 0)
+        {
+            LOGF_ERROR("Invalid buffer: dst=%p, expectedSize=%zu", dst, expectedSize);
+
+            stopAcquisition();
+
+            try
+            {
+                dataStream->QueueBuffer(buffer);
+            }
+            catch (...)
+            {
+                LOG_WARN("Could not requeue buffer after invalid destination buffer.");
+            }
+
+            return false;
+        }
+
+        LOGF_DEBUG("Processing image: %ux%u, %u bpp, buffer size: %zu",
+                   imgWidth,
+                   imgHeight,
+                   fmtInfo.bitsPerPixel,
+                   expectedSize);
+
+        // 4. Apply conversion/expansion
+        if (fmtInfo.expandFunc)
+        {
+            fmtInfo.expandFunc(src, dst, imgWidth, imgHeight);
+        }
+        else
+        {
+            size_t size = (fmtInfo.bitsPerPixel / 8) * imgWidth * imgHeight;
+            memcpy(dst, src, size);
+        }
+
+        LOGF_DEBUG("Calling ExposureComplete with buffer at %p, size %zu",
+                   dst,
+                   expectedSize);
+
+        // 5. Finalize INDI state
+        PrimaryCCD.setBPP(fmtInfo.bitsPerPixel);
+
+        stopAcquisition();
+
+        ExposureComplete(&PrimaryCCD);
+
+        try
+        {
+            dataStream->QueueBuffer(buffer);
+        }
+        catch (...)
+        {
+            LOG_WARN("Could not requeue buffer after successful image capture.");
+        }
+
+        LOGF_INFO("Image captured and processed: %ux%u at %u bpp",
+                  imgWidth,
+                  imgHeight,
+                  fmtInfo.bitsPerPixel);
+
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        LOGF_ERROR("Failed to grab image: %s", e.what());
+
+        try
+        {
+            stopAcquisition();
+        }
+        catch (...)
+        {
+        }
+
+        InExposure.store(false);
+        m_isAcquiring.store(false);
+
+        return false;
+    }
 }
 
 bool IDS_CCD::selectGainChannel()  
@@ -1447,7 +1921,7 @@ bool IDS_CCD::UpdateCCDFrame(int x, int y, int w, int h)
 {    
     LOGF_INFO("UpdateCCDFrame called: x=%d y=%d w=%d h=%d", x, y, w, h);    
     
-    if (InExposure)    
+    if (InExposure.load() || m_isAcquiring.load())
     {    
         LOG_ERROR("Cannot change ROI while exposure is in progress.");    
         return false;    
@@ -1618,7 +2092,7 @@ bool IDS_CCD::UpdateCCDBin(int binX, int binY)
         return false;      
     }      
       
-    if (InExposure)      
+    if (InExposure.load() || m_isAcquiring.load())
     {      
         LOG_ERROR("Cannot change binning while exposure is in progress.");      
         return false;      
@@ -1824,29 +2298,30 @@ bool IDS_CCD::switchUserSet(const std::string &userSet)
         int currentW = PrimaryCCD.getSubW();      
         int currentH = PrimaryCCD.getSubH();      
               
-        std::string currentFormat = pixelFormatNode->CurrentEntry()->SymbolicValue();     
-        try    
-        {    
-            // Find the pixel format node first  
-            auto pixelFormatNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");  
-            if (!pixelFormatNode)  
-            {  
-                LOG_ERROR("PixelFormat node not found");  
-                return false;  
-            }  
-              
-            // Get the camera's current format  
-            std::string currentFormat = pixelFormatNode->CurrentEntry()->SymbolicValue();    
-            LOGF_INFO("Camera current format: %s", currentFormat.c_str());  
-              
-            // Use current format for setup - no need to set it to itself  
-            // The format is already current, we just need to know what it is  
-        }    
-        catch (const std::exception &e)    
-        {    
-            LOGF_ERROR("Failed to get pixel format: %s", e.what());    
-            return false;  
-        }  
+        std::string currentFormat;
+
+        try
+        {
+            if (!pixelFormatNode)
+            {
+                pixelFormatNode =
+                    nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");
+            }
+
+            if (!pixelFormatNode)
+            {
+                LOG_ERROR("PixelFormat node not found");
+                return false;
+            }
+
+            currentFormat = pixelFormatNode->CurrentEntry()->SymbolicValue();
+            LOGF_INFO("Camera current format: %s", currentFormat.c_str());
+        }
+        catch (const std::exception &e)
+        {
+            LOGF_ERROR("Failed to get pixel format: %s", e.what());
+            return false;
+        } 
               
         // Switch userset with additional error handling      
         try      
@@ -1883,11 +2358,20 @@ bool IDS_CCD::switchUserSet(const std::string &userSet)
             // Don't fail the switch - continue with whatever format the camera set      
         }      
       
-        currentUserSet = userSet;      
-        queryExposureLimits(); // Re-query limits after switching      
-      
-        // Update frame with new binning  
-        return UpdateCCDFrame(currentX, currentY, currentW, currentH);      
+        currentUserSet = userSet;
+
+        if (currentW <= 0 || currentH <= 0)
+        {
+            LOG_WARN("Skipping frame restore after UserSet switch because current frame is not initialized.");
+            return true;
+        }
+
+        if (!UpdateCCDFrame(currentX, currentY, currentW, currentH))
+        {
+            LOG_WARN("UserSet switched, but frame restore failed.");
+        }
+
+        return true; 
     }      
     catch (const peak::core::Exception &e)      
     {      
@@ -1896,330 +2380,331 @@ bool IDS_CCD::switchUserSet(const std::string &userSet)
     }      
 }
 
-bool IDS_CCD::queryExposureLimits()    
-{    
-    try    
-    {    
-        if (!exposureNode)  
-             exposureNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("ExposureTime");  
-        minExposure = exposureNode->Minimum() / IDSConstants::MICROSECONDS_PER_SECOND; // Convert to seconds    
-        maxExposure = exposureNode->Maximum() / IDSConstants::MICROSECONDS_PER_SECOND;    
-            
-        // Query exposure increment    
-        if (exposureNode->HasConstantIncrement())    
-        {    
-            exposureStep = exposureNode->Increment() / IDSConstants::MICROSECONDS_PER_SECOND; // Convert to seconds    
-        }    
-        else    
-        {    
-            exposureStep = 0.001; // Default step if no increment available    
-        }    
-    
-        LOGF_DEBUG("Exposure limits updated: %.3f - %.3f seconds (step: %.6f)", minExposure, maxExposure, exposureStep);    
-        return true;  // Add this line  
-    }    
-    catch (const std::exception &e)    
-    {    
-        LOGF_ERROR("Failed to query exposure limits: %s", e.what());    
-        return false;  // Add this line  
-    }    
-}
-
-/*  not used by default, call it manually during debugging if needed 
-    1. At the end of Connect()
-    2. After switchUserSet()
-    3. After SetCaptureFormat()
-    4. After UpdateCCDFrame() and UpdateCCDBin()
-*/
-
-void IDS_CCD::debugCurrentState()
+bool IDS_CCD::queryExposureLimits()
 {
     try
     {
-        LOG_DEBUG("=== Current Camera State ===");
-
-        if (nodeMapRemoteDevice)
+        if (!exposureNode)
         {
-            try
-            {
-                auto userSetSelector =
-                    nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("UserSetSelector");
-
-                if (userSetSelector && userSetSelector->IsAvailable())
-                {
-                    LOGF_DEBUG("UserSetSelector: %s",
-                               userSetSelector->CurrentEntry()->SymbolicValue().c_str());
-                }
-            }
-            catch (...)
-            {
-                LOG_DEBUG("UserSetSelector: unavailable");
-            }
+            exposureNode = findExposureNode();
         }
 
-        if (pixelFormatNode && pixelFormatNode->IsAvailable())
+        if (!exposureNode)
         {
-            LOGF_DEBUG("PixelFormat: %s",
-                       pixelFormatNode->CurrentEntry()->SymbolicValue().c_str());
+            LOG_ERROR("Exposure node is not available.");
+            return false;
+        }
+
+        minExposure = exposureNode->Minimum() / IDSConstants::MICROSECONDS_PER_SECOND;
+        maxExposure = exposureNode->Maximum() / IDSConstants::MICROSECONDS_PER_SECOND;
+
+        if (exposureNode->HasConstantIncrement())
+        {
+            exposureStep = exposureNode->Increment() / IDSConstants::MICROSECONDS_PER_SECOND;
         }
         else
         {
-            LOG_DEBUG("PixelFormat: unavailable");
+            exposureStep = 0.001;
         }
 
-        LOGF_DEBUG("Exposure range: %.6f - %.6f seconds, step %.6f",
-                   minExposure, maxExposure, exposureStep);
+        LOGF_DEBUG("Exposure limits updated: %.6f - %.6f seconds (step: %.6f)",
+                   minExposure,
+                   maxExposure,
+                   exposureStep);
 
-        LOGF_DEBUG("Full exposure range: %.6f - %.6f seconds, LongExposure threshold %.6f",
-                   fullMin, fullMax, longExposureMin);
-
-        LOGF_DEBUG("Frame: %dx%d at (%d,%d), binning %dx%d",
-                   PrimaryCCD.getSubW(), PrimaryCCD.getSubH(),
-                   PrimaryCCD.getSubX(), PrimaryCCD.getSubY(),
-                   PrimaryCCD.getBinX(), PrimaryCCD.getBinY());
-
-        LOGF_DEBUG("Sensor: %dx%d, BPP: %d, Pixel size: %.2f x %.2f um",
-                   cameraWidth, cameraHeight, cameraBPP, pixelSizeX, pixelSizeY);
-
-        LOGF_DEBUG("State: InExposure=%s, IsAcquiring=%s, HasGain=%s, HasOffset=%s, HasTemperature=%s, HasBayer=%s",
-                   InExposure ? "true" : "false",
-                   m_isAcquiring ? "true" : "false",
-                   HasGain ? "true" : "false",
-                   HasOffset ? "true" : "false",
-                   HasTemperature ? "true" : "false",
-                   m_hasBayer ? "true" : "false");
+        return true;
     }
     catch (const std::exception &e)
     {
-        LOGF_ERROR("Failed to debug current state: %s", e.what());
+        LOGF_ERROR("Failed to query exposure limits: %s", e.what());
+        return false;
     }
 }
 
 
-void IDS_CCD::queryPixelFormats()          
-{          
-    LOG_INFO("=== queryPixelFormats() ENTRY ===");          
-    LOG_INFO("=== Starting queryPixelFormats() ===");          
-          
-    m_formatMap.clear();          
-    LOG_INFO("after: m_formatMap.clear();");        
-    m_supportedBitDepths.clear();          
-    LOG_INFO("after: m_supportedBitDepths.clear();");        
-    m_compressionSupport.clear();          
-    LOG_INFO("after: m_compressionSupport.clear();");          
-      
-          
-    try          
-    {          
-        // Use cached node if available, otherwise find it          
-        LOG_INFO("Checking nodeMapRemoteDevice...(before IF)");         
-        if (!pixelFormatNode) {          
-            LOG_INFO("Querying pixel format node...");           
-            pixelFormatNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");          
-            LOG_INFO("PixelFormat node found successfully");          
-        } else {          
-            LOG_INFO("Using cached PixelFormat node");          
-        }          
-          
-        LOG_INFO("Getting pixel format entries...");          
-        auto allEntries = pixelFormatNode->Entries();          
-        LOGF_INFO("Found %zu pixel format entries", allEntries.size());          
-          
-        // Track supported modes      
-        bool supports8bit  = false;          
-        bool supports10bit = false;          
-        bool supports12bit = false;          
-        bool supports16bit = false;          
-          
-        LOG_INFO("Processing pixel format entries...");          
-        int processedEntries = 0;          
-        for (const auto &entry : allEntries)          
-        {          
-            processedEntries++;          
-            if (processedEntries % 10 == 0) {          
-                LOGF_DEBUG("Processed %d entries so far...", processedEntries);          
-            }          
-          
-            if (entry->AccessStatus() == peak::core::nodes::NodeAccessStatus::NotAvailable ||          
-                entry->AccessStatus() == peak::core::nodes::NodeAccessStatus::NotImplemented)          
-            {          
-                continue;          
-            }          
-          
-            std::string formatName = entry->SymbolicValue();          
-            LOGF_DEBUG("Processing format: %s", formatName.c_str());          
-          
-            // Handle both Mono and Bayer formats  
-            bool isMono = (formatName.find("Mono") == 0);  
-            bool isBayer = (formatName.find("Bayer") != std::string::npos);  
-              
-            if (!isMono && !isBayer) continue;  
-              
-            // Process Mono formats  
-            if (isMono)  
-            {          
-                // Check bit depth support and populate format map        
-                if (formatName == "Mono8")          
-                {          
-                    supports8bit = true;        
-                    m_formatMap["Mono8"] = PixelFormatInfo(        
-                        "Mono8",           // idsName        
-                        "Mono8",           // indiName        
-                        8,                 // bitsPerPixel        
-                        false,             // packed       
-                        false,             // isDefault      
-                        nullptr            // expandFunc        
-                    );        
-                    LOGF_INFO("Available: 8-bit uncompressed (%s)", formatName.c_str());          
-                }          
-                else if (formatName == "Mono8p")          
-                {          
-                    supports8bit = true;        
-                    m_compressionSupport[8] = true;        
-                    m_formatMap["Mono8_Packed"] = PixelFormatInfo(        
-                        "Mono8p",           // idsName        
-                        "Mono8_Packed",     // indiName        
-                        8,                 // bitsPerPixel        
-                        true,              // packed        
-                        false,             // isDefault      
-                        nullptr            // expandFunc        
-                    );        
-                    LOGF_INFO("Available: 8-bit compressed (%s)", formatName.c_str());          
-                }          
-                else if (formatName == "Mono10")          
-                {          
-                    supports10bit = true;        
-                    // For Mono10 uncompressed        
-                    m_formatMap["Mono10"] = PixelFormatInfo(          
-                        "Mono10",           // idsName          
-                        "Mono10",           // indiName          
-                        16,                // bitsPerPixel          
-                        false,             // packed      
-                        false,             // isDefault      
-                        [this](const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {          
-                            expand10bitTo16bit(src, dst, w, h);  // Remove extra parameter    
-                        }           
-                    );         
-                    LOGF_INFO("Available: 10-bit uncompressed (%s)", formatName.c_str());          
-                }          
-                else if (formatName == "Mono10p")          
-                {          
-                    supports10bit = true;        
-                    m_compressionSupport[10] = true;        
-                    m_formatMap["Mono10_Packed"] = PixelFormatInfo(        
-                        "Mono10p",           // idsName        
-                        "Mono10_Packed",     // indiName        
-                        16,                // bitsPerPixel        
-                        true,              // packed        
-                        false,             // isDefault      
-                        [this](const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {        
-                            expand10bitTo16bit(src, dst, w, h);  // Remove extra parameter    
-                        }        
-                    );        
-                    LOGF_INFO("Available: 10-bit compressed (%s)", formatName.c_str());          
-                }          
-                else if (formatName == "Mono12")          
-                {          
-                    supports12bit = true;        
-                    // For Mono12 uncompressed          
-                    m_formatMap["Mono12"] = PixelFormatInfo(          
-                        "Mono12",           // idsName          
-                        "Mono12",           // indiName          
-                        16,                // bitsPerPixel          
-                        false,             // packed       
-                        false,             // isDefault      
-                        [this](const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {          
-                            expand12bitTo16bit(src, dst, w, h);  // Remove extra parameter    
-                        }         
-                    );       
-                    LOGF_INFO("Available: 12-bit uncompressed (%s)", formatName.c_str());          
-                }          
-                else if (formatName == "Mono12p")          
-                {          
-                    supports12bit = true;        
-                    m_compressionSupport[12] = true;        
-                    m_formatMap["Mono12_Packed"] = PixelFormatInfo(        
-                        "Mono12p",           // idsName        
-                        "Mono12_Packed",     // indiName        
-                        16,                // bitsPerPixel        
-                        true,              // packed          
-                        false,             // isDefault      
-                        [this](const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {        
-                            expand12bitTo16bit(src, dst, w, h);  // Remove extra parameter    
-                        }        
-                    );        
-                    LOGF_INFO("Available: 12-bit compressed (%s)", formatName.c_str());          
-                }          
-            }  
-            // Process Bayer formats    
-            else if (isBayer)    
-            {    
-                // Extract bit depth from format name    
-                int bitDepth = 8; // default    
-                if (formatName.find("8") != std::string::npos) bitDepth = 8;    
-                else if (formatName.find("10") != std::string::npos) bitDepth = 10;    
-                else if (formatName.find("12") != std::string::npos) bitDepth = 12;    
-                else if (formatName.find("16") != std::string::npos) bitDepth = 16;    
-                    
-                // Update support flags    
-                if (bitDepth == 8) supports8bit = true;    
-                else if (bitDepth == 10) supports10bit = true;    
-                else if (bitDepth == 12) supports12bit = true;    
-                else if (bitDepth == 16) supports16bit = true;    
-                    
-                // Create INDI format name    
-                std::string bayerPattern = mapCameraFormatToBayerPattern(formatName);    
-                if (!bayerPattern.empty()) {    
-                    std::string indiFormat = "INDI_BAYER_" + bayerPattern;    
-                        
-                    // FIX: Use camera format name as key, not INDI format name  
-                    m_formatMap[formatName] = PixelFormatInfo(    
-                        formatName,        // idsName - camera format    
-                        indiFormat,        // indiName - INDI format    
-                        bitDepth,          // bitsPerPixel    
-                        false,             // packed    
-                        false,             // isDefault    
-                        nullptr            // expandFunc    
-                    );    
-                        
-                    LOGF_INFO("Available: Bayer format (%s -> %s)", formatName.c_str(), indiFormat.c_str());    
-                }    
-            }         
-        }          
-          
-        LOG_INFO("Finished processing entries, creating summary...");    
-        
-         
-        // -------------------------          
-        // Bit depth summary          
-        // -------------------------          
-        if (supports8bit)  m_supportedBitDepths.push_back(8);          
-        if (supports10bit) m_supportedBitDepths.push_back(10);          
-        if (supports12bit) m_supportedBitDepths.push_back(12);          
-        if (supports16bit) m_supportedBitDepths.push_back(16);          
-          
-        m_maxBitDepth = 8;          
-        if (supports10bit) m_maxBitDepth = 10;          
-        if (supports12bit) m_maxBitDepth = 12;          
-        if (supports16bit) m_maxBitDepth = 16;          
-          
-        LOGF_INFO("Camera supports %zu pixel formats. Max depth: %d",          
-                  m_formatMap.size(), m_maxBitDepth);          
-        LOG_INFO("=== queryPixelFormats() completed successfully ===");          
-    }          
-    catch (const std::exception &e)          
-    {          
-        LOGF_ERROR("Failed to query pixel formats: %s", e.what());          
-        LOG_INFO("Setting fallback Mono8 format...");          
-        // Explicit Constructor Call in catch block          
-        m_formatMap["Mono8"] = PixelFormatInfo("Mono8", "Mono8", 8, false, false, nullptr);          
-        m_supportedBitDepths.push_back(8);          
-        m_maxBitDepth = 8;          
-    }          
+void IDS_CCD::queryPixelFormats()
+{
+    LOG_INFO("=== queryPixelFormats() ENTRY ===");
+
+    m_formatMap.clear();
+    m_supportedBitDepths.clear();
+    m_compressionSupport.clear();
+
+    try
+    {
+        if (!pixelFormatNode)
+        {
+            LOG_INFO("Querying pixel format node...");
+            pixelFormatNode =
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");
+        }
+        else
+        {
+            LOG_INFO("Using cached PixelFormat node");
+        }
+
+        if (!pixelFormatNode)
+        {
+            LOG_ERROR("PixelFormat node is not available.");
+            throw std::runtime_error("PixelFormat node is not available.");
+        }
+
+        auto allEntries = pixelFormatNode->Entries();
+        LOGF_INFO("Found %zu pixel format entries", allEntries.size());
+
+        bool supports8bit  = false;
+        bool supports10bit = false;
+        bool supports12bit = false;
+        bool supports16bit = false;
+
+        auto makeExpandFunc =
+            [this](int sourceBitDepth, bool packed)
+            -> std::function<void(const uint8_t *, uint8_t *, uint32_t, uint32_t)>
+        {
+            if (sourceBitDepth == 10 && packed)
+            {
+                return [this](const uint8_t *src, uint8_t *dst, uint32_t w, uint32_t h)
+                {
+                    expand10bitPackedTo16bit(src, dst, w, h);
+                };
+            }
+
+            if (sourceBitDepth == 10 && !packed)
+            {
+                return [this](const uint8_t *src, uint8_t *dst, uint32_t w, uint32_t h)
+                {
+                    expand10bitTo16bit(src, dst, w, h);
+                };
+            }
+
+            if (sourceBitDepth == 12 && packed)
+            {
+                return [this](const uint8_t *src, uint8_t *dst, uint32_t w, uint32_t h)
+                {
+                    expand12bitPackedTo16bit(src, dst, w, h);
+                };
+            }
+
+            if (sourceBitDepth == 12 && !packed)
+            {
+                return [this](const uint8_t *src, uint8_t *dst, uint32_t w, uint32_t h)
+                {
+                    expand12bitTo16bit(src, dst, w, h);
+                };
+            }
+
+            return nullptr;
+        };
+
+        auto detectBitDepth = [](const std::string &formatName) -> int
+        {
+            if (formatName.find("16") != std::string::npos)
+                return 16;
+
+            if (formatName.find("12") != std::string::npos)
+                return 12;
+
+            if (formatName.find("10") != std::string::npos)
+                return 10;
+
+            if (formatName.find("8") != std::string::npos)
+                return 8;
+
+            return 8;
+        };
+
+        auto makeMonoLabel = [](int sourceBitDepth, bool packed) -> std::string
+        {
+            if (packed)
+                return std::to_string(sourceBitDepth) + "-bit (packed)";
+
+            return std::to_string(sourceBitDepth) + "-bit";
+        };
+
+        auto makeBayerLabel =
+            [this](const std::string &formatName, int sourceBitDepth, bool packed) -> std::string
+        {
+            std::string pattern = mapCameraFormatToBayerPattern(formatName);
+
+            if (pattern.empty())
+                pattern = "Bayer";
+
+            std::string label =
+                "INDI_BAYER_" + pattern + " " + std::to_string(sourceBitDepth) + "-bit";
+
+            if (packed)
+                label += " (packed)";
+
+            return label;
+        };
+
+        LOG_INFO("Processing pixel format entries...");
+
+        for (const auto &entry : allEntries)
+        {
+            try
+            {
+                if (entry->AccessStatus() == peak::core::nodes::NodeAccessStatus::NotAvailable ||
+                    entry->AccessStatus() == peak::core::nodes::NodeAccessStatus::NotImplemented)
+                {
+                    continue;
+                }
+
+                if (!entry->IsAvailable())
+                    continue;
+
+                const std::string formatName = entry->SymbolicValue();
+
+                const bool isMono =
+                    formatName.find("Mono") == 0;
+
+                const bool isBayer =
+                    formatName.find("Bayer") != std::string::npos;
+
+                if (!isMono && !isBayer)
+                    continue;
+
+                const int sourceBitDepth = detectBitDepth(formatName);
+                const bool packed =
+                    !formatName.empty() && formatName.back() == 'p';
+
+                // Output buffer depth. 10-bit and 12-bit are expanded to 16-bit.
+                const uint8_t outputBpp =
+                    static_cast<uint8_t>((sourceBitDepth <= 8) ? 8 : 16);
+
+                if (sourceBitDepth == 8)
+                    supports8bit = true;
+                else if (sourceBitDepth == 10)
+                    supports10bit = true;
+                else if (sourceBitDepth == 12)
+                    supports12bit = true;
+                else if (sourceBitDepth == 16)
+                    supports16bit = true;
+
+                if (packed)
+                    m_compressionSupport[sourceBitDepth] = true;
+
+                auto expandFunc = makeExpandFunc(sourceBitDepth, packed);
+
+                if (isMono)
+                {
+                    const std::string label = makeMonoLabel(sourceBitDepth, packed);
+
+                    m_formatMap[formatName] =
+                        PixelFormatInfo(formatName,
+                                        label,
+                                        outputBpp,
+                                        packed,
+                                        false,
+                                        expandFunc);
+
+                    LOGF_INFO("Available Mono format: %s -> %s, source=%d-bit, output=%u-bit%s",
+                              formatName.c_str(),
+                              label.c_str(),
+                              sourceBitDepth,
+                              outputBpp,
+                              packed ? ", packed" : "");
+                }
+                else if (isBayer)
+                {
+                    const std::string bayerPattern =
+                        mapCameraFormatToBayerPattern(formatName);
+
+                    if (bayerPattern.empty())
+                    {
+                        LOGF_DEBUG("Skipping Bayer format with unknown pattern: %s",
+                                   formatName.c_str());
+                        continue;
+                    }
+
+                    const std::string label =
+                        makeBayerLabel(formatName, sourceBitDepth, packed);
+
+                    m_formatMap[formatName] =
+                        PixelFormatInfo(formatName,
+                                        label,
+                                        outputBpp,
+                                        packed,
+                                        false,
+                                        expandFunc);
+
+                    LOGF_INFO("Available Bayer format: %s -> %s, source=%d-bit, output=%u-bit%s",
+                              formatName.c_str(),
+                              label.c_str(),
+                              sourceBitDepth,
+                              outputBpp,
+                              packed ? ", packed" : "");
+                }
+            }
+            catch (const std::exception &e)
+            {
+                LOGF_DEBUG("Skipping pixel format entry because it could not be queried: %s",
+                           e.what());
+            }
+        }
+
+        if (supports8bit)
+            m_supportedBitDepths.push_back(8);
+
+        if (supports10bit)
+            m_supportedBitDepths.push_back(10);
+
+        if (supports12bit)
+            m_supportedBitDepths.push_back(12);
+
+        if (supports16bit)
+            m_supportedBitDepths.push_back(16);
+
+        m_maxBitDepth = 8;
+
+        if (supports10bit)
+            m_maxBitDepth = 10;
+
+        if (supports12bit)
+            m_maxBitDepth = 12;
+
+        if (supports16bit)
+            m_maxBitDepth = 16;
+
+        if (m_formatMap.empty())
+        {
+            LOG_WARN("No supported Mono/Bayer pixel formats found. Falling back to Mono8.");
+            m_formatMap["Mono8"] = PixelFormatInfo("Mono8", "8-bit", 8, false, false, nullptr);
+            m_supportedBitDepths.push_back(8);
+            m_maxBitDepth = 8;
+        }
+
+        LOGF_INFO("Camera supports %zu usable pixel formats. Max source depth: %d",
+                  m_formatMap.size(),
+                  m_maxBitDepth);
+
+        LOG_INFO("=== queryPixelFormats() completed successfully ===");
+    }
+    catch (const std::exception &e)
+    {
+        LOGF_ERROR("Failed to query pixel formats: %s", e.what());
+        LOG_INFO("Setting fallback Mono8 format...");
+
+        m_formatMap.clear();
+        m_supportedBitDepths.clear();
+        m_compressionSupport.clear();
+
+        m_formatMap["Mono8"] =
+            PixelFormatInfo("Mono8", "8-bit", 8, false, false, nullptr);
+
+        m_supportedBitDepths.push_back(8);
+        m_maxBitDepth = 8;
+    }
 }
 
 bool IDS_CCD::SetCaptureFormat(uint8_t index)
 {
+    if (InExposure.load() || m_isAcquiring.load())
+    {
+        LOG_ERROR("Cannot change capture format while exposure/acquisition is active.");
+        return false;
+    }
+
     auto &formatSP = CaptureFormatSP;
 
     if (index >= formatSP.size())
@@ -2228,7 +2713,7 @@ bool IDS_CCD::SetCaptureFormat(uint8_t index)
         return false;
     }
 
-    // With the cleaned-up format handling, the switch name must be the IDS pixel format name.
+    // The switch name must be the real IDS / GenICam pixel format name.
     // Example: Mono8, Mono10, Mono10p, Mono12, Mono12p, BayerRG8, ...
     const std::string idsFormatName = formatSP[index].getName();
 
@@ -2261,31 +2746,31 @@ bool IDS_CCD::SetCaptureFormat(uint8_t index)
             return false;
         }
 
-        // Stop acquisition before changing a payload-affecting feature.
+        // Do not change payload-affecting features while the stream is grabbing.
+        // If this happens while InExposure/m_isAcquiring are false, the internal
+        // state is inconsistent and should be handled elsewhere, not silently here.
         if (dataStream->IsGrabbing())
         {
-            LOG_WARN("Stopping active acquisition before changing pixel format.");
-
-            if (acquisitionStopNode && acquisitionStopNode->IsAvailable())
-            {
-                acquisitionStopNode->Execute();
-                acquisitionStopNode->WaitUntilDone();
-            }
-
-            dataStream->StopAcquisition(peak::core::AcquisitionStopMode::Default);
-            m_isAcquiring = false;
-            InExposure = false;
+            LOG_ERROR("Cannot change capture format while data stream is grabbing.");
+            return false;
         }
 
         // Clear old buffers before changing/reallocating payload.
-        dataStream->Flush(peak::core::DataStreamFlushMode::DiscardAll);
+        try
+        {
+            dataStream->Flush(peak::core::DataStreamFlushMode::DiscardAll);
+        }
+        catch (const std::exception &e)
+        {
+            LOGF_WARN("Could not flush data stream before pixel format change: %s", e.what());
+        }
 
         for (auto &oldBuffer : dataStream->AnnouncedBuffers())
         {
             dataStream->RevokeBuffer(oldBuffer);
         }
 
-        // Set the new pixel format using the real IDS/GenICam name.
+        // Set the new pixel format using the real IDS / GenICam name.
         pixelFormatNode->SetCurrentEntry(formatInfo.idsName);
 
         // Verify that the camera accepted the format.
@@ -2694,62 +3179,154 @@ std::string IDS_CCD::mapCameraFormatToBayerPattern(const std::string& formatName
 }  
   
 // Helper to create Bayer PixelFormatInfo  
-void IDS_CCD::addBayerCaptureFormats(std::vector<PixelFormatInfo>& captureFormats,     
-                           const std::string& bayerPattern,    
-                           const std::vector<int>& supportedDepths)    
-{    
-    LOG_INFO("=== Adding Bayer Capture Formats ===");  
-    LOGF_INFO("Detected Bayer pattern: %s", bayerPattern.c_str());  
-      
-    // Map Bayer patterns to INDI format names    
-    static const std::map<std::string, std::string> bayerToINDI = {    
-        {"RGGB", "INDI_BAYER_RGGB"},    
-        {"BGGR", "INDI_BAYER_BGGR"},    
-        {"GBRG", "INDI_BAYER_GRBG"},    
-        {"GRBG", "INDI_BAYER_GBRG"}    
-    };    
-        
-    auto it = bayerToINDI.find(bayerPattern);    
-    if (it == bayerToINDI.end()) {  
-        LOGF_ERROR("Unknown Bayer pattern: %s", bayerPattern.c_str());  
-        return;    
-    }  
-        
-    const std::string& indiFormat = it->second;    
-    LOGF_INFO("Mapping %s -> %s", bayerPattern.c_str(), indiFormat.c_str());  
-      
-    // Log supported depths  
-    LOG_INFO("Supported bit depths:");  
-    for (int depth : supportedDepths) {  
-        LOGF_INFO("  %d-bit", depth);  
-    }  
-        
-    // Add 8-bit formats    
-    if (std::find(supportedDepths.begin(), supportedDepths.end(), 8) != supportedDepths.end()) {    
-        std::string formatName = "Bayer" + bayerPattern.substr(0, 2) + "8";  
-        LOGF_INFO("Adding 8-bit format: %s -> %s", formatName.c_str(), indiFormat.c_str());  
-        captureFormats.push_back(PixelFormatInfo(    
-            formatName,     
-            indiFormat, 8, false, false, nullptr));    
-    } else {  
-        LOGF_INFO("8-bit not supported for %s", bayerPattern.c_str());  
-    }  
-        
-    // Add 16-bit formats    
-    if (std::find(supportedDepths.begin(), supportedDepths.end(), 16) != supportedDepths.end()) {    
-        std::string formatName = "Bayer" + bayerPattern.substr(0, 2) + "16";  
-        LOGF_INFO("Adding 16-bit format: %s -> %s", formatName.c_str(), indiFormat.c_str());  
-        captureFormats.push_back(PixelFormatInfo(    
-            formatName,     
-            indiFormat, 16, false, false, nullptr));    
-    } else {  
-        LOGF_INFO("16-bit not supported for %s", bayerPattern.c_str());  
-    }  
-      
-    LOGF_INFO("Total capture formats after adding Bayer: %zu", captureFormats.size());  
-    LOG_INFO("=== Bayer Format Addition Complete ===");  
+void IDS_CCD::addBayerCaptureFormats(std::vector<PixelFormatInfo> &captureFormats,
+                                     const std::string &bayerPattern,
+                                     const std::vector<int> &supportedDepths)
+{
+    LOG_INFO("=== Adding Bayer Capture Formats ===");
+    LOGF_INFO("Detected Bayer pattern: %s", bayerPattern.c_str());
+
+    size_t addedCount = 0;
+
+    auto alreadyAdded =
+        [&captureFormats](const std::string &idsName) -> bool
+    {
+        return std::any_of(captureFormats.begin(),
+                           captureFormats.end(),
+                           [&idsName](const PixelFormatInfo &fmt)
+                           {
+                               return fmt.idsName == idsName;
+                           });
+    };
+
+    for (const auto &kv : m_formatMap)
+    {
+        const PixelFormatInfo &fmt = kv.second;
+
+        if (fmt.idsName.find("Bayer") == std::string::npos)
+            continue;
+
+        const std::string pattern = mapCameraFormatToBayerPattern(fmt.idsName);
+
+        if (pattern != bayerPattern)
+            continue;
+
+        if (alreadyAdded(fmt.idsName))
+            continue;
+
+        captureFormats.push_back(fmt);
+        ++addedCount;
+
+        LOGF_INFO("Added Bayer capture format: %s -> %s, output=%u-bit%s",
+                  fmt.idsName.c_str(),
+                  fmt.indiName.c_str(),
+                  fmt.bitsPerPixel,
+                  fmt.packed ? ", packed" : "");
+    }
+
+    if (addedCount == 0)
+    {
+        LOGF_WARN("No Bayer formats were added for pattern %s. Check m_formatMap population.",
+                  bayerPattern.c_str());
+    }
+    else
+    {
+        LOGF_INFO("Added %zu Bayer capture formats.", addedCount);
+    }
+
+    LOG_INFO("=== Bayer Format Addition Complete ===");
 }
 
+// helper method
+std::shared_ptr<peak::core::nodes::FloatNode> IDS_CCD::findExposureNode()
+{
+    if (!nodeMapRemoteDevice)
+    {
+        throw std::runtime_error("Remote device node map is not initialized.");
+    }
+
+    try
+    {
+        return nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("ExposureTime");
+    }
+    catch (const std::exception &e1)
+    {
+        LOGF_DEBUG("ExposureTime node not available, trying ExposureTimeAbs: %s", e1.what());
+
+        try
+        {
+            return nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("ExposureTimeAbs");
+        }
+        catch (const std::exception &e2)
+        {
+            LOGF_ERROR("Neither ExposureTime nor ExposureTimeAbs is available. ExposureTimeAbs error: %s", e2.what());
+            throw;
+        }
+    }
+}
+
+void IDS_CCD::debugCurrentState()
+{
+    try
+    {
+        LOG_DEBUG("=== Current Camera State ===");
+
+        if (nodeMapRemoteDevice)
+        {
+            try
+            {
+                auto userSetSelector =
+                    nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("UserSetSelector");
+
+                if (userSetSelector && userSetSelector->IsAvailable())
+                {
+                    LOGF_DEBUG("UserSetSelector: %s",
+                               userSetSelector->CurrentEntry()->SymbolicValue().c_str());
+                }
+            }
+            catch (...)
+            {
+                LOG_DEBUG("UserSetSelector: unavailable");
+            }
+        }
+
+        if (pixelFormatNode && pixelFormatNode->IsAvailable())
+        {
+            LOGF_DEBUG("PixelFormat: %s",
+                       pixelFormatNode->CurrentEntry()->SymbolicValue().c_str());
+        }
+        else
+        {
+            LOG_DEBUG("PixelFormat: unavailable");
+        }
+
+        LOGF_DEBUG("Exposure range: %.6f - %.6f seconds, step %.6f",
+                   minExposure, maxExposure, exposureStep);
+
+        LOGF_DEBUG("Full exposure range: %.6f - %.6f seconds, LongExposure threshold %.6f",
+                   fullMin, fullMax, longExposureMin);
+
+        LOGF_DEBUG("Frame: %dx%d at (%d,%d), binning %dx%d",
+                   PrimaryCCD.getSubW(), PrimaryCCD.getSubH(),
+                   PrimaryCCD.getSubX(), PrimaryCCD.getSubY(),
+                   PrimaryCCD.getBinX(), PrimaryCCD.getBinY());
+
+        LOGF_DEBUG("Sensor: %dx%d, BPP: %d, Pixel size: %.2f x %.2f um",
+                   cameraWidth, cameraHeight, cameraBPP, pixelSizeX, pixelSizeY);
+
+        LOGF_DEBUG("State: InExposure=%s, IsAcquiring=%s, HasGain=%s, HasOffset=%s, HasTemperature=%s, HasBayer=%s",
+                   InExposure.load() ? "true" : "false",
+                   m_isAcquiring.load() ? "true" : "false",
+                   HasGain ? "true" : "false",
+                   HasOffset ? "true" : "false",
+                   HasTemperature ? "true" : "false",
+                   m_hasBayer ? "true" : "false");
+    }
+    catch (const std::exception &e)
+    {
+        LOGF_ERROR("Failed to debug current state: %s", e.what());
+    }
+}
 
 bool IDS_CCD::setupParams()
 {
@@ -2829,17 +3406,6 @@ bool IDS_CCD::setupParams()
         if (std::find(m_supportedBitDepths.begin(), m_supportedBitDepths.end(), 8) !=
             m_supportedBitDepths.end())
         {
-            if (m_compressionSupport[8])
-            {
-                captureFormats.push_back(
-                    PixelFormatInfo("Mono8_Packed",
-                                    "8-bit (compressed)",
-                                    8,
-                                    true,
-                                    false,
-                                    nullptr));
-            }
-
             captureFormats.push_back(
                 PixelFormatInfo("Mono8",
                                 "8-bit",
@@ -2942,8 +3508,8 @@ bool IDS_CCD::setupParams()
                 if (dataStream && dataStream->IsGrabbing())
                 {
                     dataStream->StopAcquisition(peak::core::AcquisitionStopMode::Default);
-                    m_isAcquiring = false;
-                    InExposure = false;
+                    InExposure.store(false);
+                    m_isAcquiring.store(false);
                 }
 
                 if (acquisitionStopNode && acquisitionStopNode->IsAvailable())
@@ -3099,20 +3665,12 @@ bool IDS_CCD::setupParams()
             LOGF_WARN("Could not set default pixel format: %s", e.what());
         }
 
-        // Configure INDI CCD parameters with full sensor.
-        LOGF_DEBUG("Before SetCCDParams: width=%d, height=%d, bpp=%d, pixelX=%.2f, pixelY=%.2f",
-                   cameraWidth, cameraHeight, cameraBPP, pixelSizeX, pixelSizeY);
-
-        if (cameraWidth <= 0 ||
-            cameraHeight <= 0 ||
-            cameraBPP <= 0 ||
-            pixelSizeX <= 0 ||
-            pixelSizeY <= 0)
+        // CCD parameters and full-frame ROI were already initialized before user-set switching.
+        // Keep this sanity check for diagnostics only.
+        if (PrimaryCCD.getSubW() <= 0 || PrimaryCCD.getSubH() <= 0)
         {
-            LOG_ERROR("Invalid camera parameters detected - cannot set CCD params.");
-            LOGF_ERROR("Parameters: width=%d, height=%d, bpp=%d, pixelX=%.2f, pixelY=%.2f",
-                       cameraWidth, cameraHeight, cameraBPP, pixelSizeX, pixelSizeY);
-            return false;
+            LOG_WARN("PrimaryCCD frame was unexpectedly invalid after user-set setup. Restoring full frame.");
+            PrimaryCCD.setFrame(0, 0, cameraWidth, cameraHeight);
         }
 
         SetCCDParams(cameraWidth, cameraHeight, cameraBPP, pixelSizeX, pixelSizeY);
@@ -3146,6 +3704,30 @@ bool IDS_CCD::setupParams()
         {
             LOG_INFO("Gain control is not available.");
         }
+        
+        // Configure INDI CCD parameters before any UserSet switching.
+        // switchUserSet() may restore ROI via UpdateCCDFrame(), so PrimaryCCD frame
+        // must already be valid here.
+        LOGF_DEBUG("Before early SetCCDParams: width=%d, height=%d, bpp=%d, pixelX=%.2f, pixelY=%.2f",
+                   cameraWidth, cameraHeight, cameraBPP, pixelSizeX, pixelSizeY);
+
+        if (cameraWidth <= 0 ||
+            cameraHeight <= 0 ||
+            cameraBPP <= 0 ||
+            pixelSizeX <= 0 ||
+            pixelSizeY <= 0)
+        {
+            LOG_ERROR("Invalid camera parameters detected before user-set setup.");
+            LOGF_ERROR("Parameters: width=%d, height=%d, bpp=%d, pixelX=%.2f, pixelY=%.2f",
+                       cameraWidth, cameraHeight, cameraBPP, pixelSizeX, pixelSizeY);
+            return false;
+        }
+
+        SetCCDParams(cameraWidth, cameraHeight, cameraBPP, pixelSizeX, pixelSizeY);
+        PrimaryCCD.setFrame(0, 0, cameraWidth, cameraHeight);
+
+        LOGF_INFO("Initialized INDI CCD frame before user-set switching: %dx%d, %d bpp",
+                  cameraWidth, cameraHeight, cameraBPP);
 
         // User set and exposure limits must always be initialized, regardless of gain support.
         LOG_INFO("=== Starting user set queries ===");
