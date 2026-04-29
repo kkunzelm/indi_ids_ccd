@@ -257,6 +257,9 @@ bool IDS_CCD::initProperties()
       
     INDI::CCD::initProperties();  
     
+    addDebugControl();    
+    addConfigurationControl();   
+    
     LOG_DEBUG("Base CCD properties initialized"); 
     
     
@@ -282,7 +285,6 @@ bool IDS_CCD::initProperties()
     LOGF_DEBUG("Temperature property initialized for device: %s", getDeviceName());  
 
   
-    addAuxControls();  
     LOG_INFO("=== initProperties() completed successfully ==="); 
     return true;  
 }
@@ -826,71 +828,91 @@ bool IDS_CCD::stopAcquisition()
     }
 }
 
-bool IDS_CCD::StartExposure(float duration)    
-{   
-    if (InExposure)    
-    {    
-        LOG_ERROR("Exposure already in progress. Abort current exposure first.");    
-        return false;    
-    }    
-    
-    // Validate exposure duration against available limits    
-    if (duration < fullMin || duration > fullMax)    
-    {    
-        LOGF_ERROR("Exposure duration %.6fs is out of range [%.6fs, %.6fs]",     
-                   duration, fullMin, fullMax);    
-        return false;    
-    }    
-    
-    // Store exposure request for thread  
-    m_ExposureRequest = duration;  
-    
-    // Determine which user set is needed for this duration    
-    std::string targetUserSet = determineUserSetForDuration(duration);    
-    
-    // Switch user set if needed    
-    if (targetUserSet != currentUserSet)    
-    {    
-        if (!switchUserSet(targetUserSet))    
-        {    
-            LOG_ERROR("Failed to switch exposure mode");    
-            return false;    
-        }    
-        currentUserSet = targetUserSet;    
-    }    
-    
-    if (!configureExposure(duration))    
-    {    
-        LOG_ERROR("Failed to configure exposure duration.");    
-        return false;    
-    }    
-    
-    try    
-    {    
-        dataStream->StartAcquisition(peak::core::AcquisitionStartMode::Default, 1);    
-        nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("AcquisitionStart")->Execute();    
-    }    
-    catch (const std::exception &e)    
-    {    
-        LOGF_ERROR("Failed to start acquisition: %s", e.what());    
-        return false;    
-    }    
-    
-    gettimeofday(&ExpStart, nullptr);    
-    PrimaryCCD.setExposureDuration(duration);    
-    InExposure = true;    
-    
-    LOGF_INFO("Starting %.3f second exposure (%s mode).", duration, targetUserSet.c_str());    
-    
-    // Signal imaging thread to handle exposure monitoring  
-    pthread_mutex_lock(&condMutex);  
-    m_ThreadRequest = StateExposure;  
-    pthread_cond_signal(&cv);  
-    pthread_mutex_unlock(&condMutex);  
-    
-    SetTimer(getCurrentPollingPeriod());    
-    
-    return true;    
+bool IDS_CCD::StartExposure(float duration)      
+{     
+    if (InExposure)      
+    {      
+        LOG_ERROR("Exposure already in progress. Abort current exposure first.");      
+        return false;      
+    }      
+      
+    // Validate exposure duration against available limits      
+    if (duration < fullMin || duration > fullMax)      
+    {      
+        LOGF_ERROR("Exposure duration %.6fs is out of range [%.6fs, %.6fs]",       
+                   duration, fullMin, fullMax);      
+        return false;      
+    }      
+      
+    // Store exposure request for thread    
+    m_ExposureRequest = duration;    
+      
+    // Determine which user set is needed for this duration      
+    std::string targetUserSet = determineUserSetForDuration(duration);      
+      
+    // Switch user set if needed      
+    if (targetUserSet != currentUserSet)      
+    {      
+        if (!switchUserSet(targetUserSet))      
+        {      
+            LOG_ERROR("Failed to switch exposure mode");      
+            return false;      
+        }      
+        currentUserSet = targetUserSet;      
+    }      
+      
+    if (!configureExposure(duration))      
+    {      
+        LOG_ERROR("Failed to configure exposure duration.");      
+        return false;      
+    }      
+      
+    // ADD RESOURCE CHECK HERE  
+    try {  
+        // Check if stream is already running and stop it first  
+        if (dataStream && dataStream->IsGrabbing()) {  
+            LOG_WARN("Data stream is already active, stopping it first...");  
+              
+            // Stop hardware acquisition  
+            if (acquisitionStopNode && acquisitionStopNode->IsAvailable()) {  
+                acquisitionStopNode->Execute();  
+                acquisitionStopNode->WaitUntilDone();  
+            }  
+              
+            // Stop software stream  
+            dataStream->StopAcquisition(peak::core::AcquisitionStopMode::Default);  
+            LOG_INFO("Previous acquisition stopped successfully");  
+        }  
+    } catch (const std::exception &e) {  
+        LOGF_WARN("Could not stop previous acquisition: %s", e.what());  
+    }  
+      
+    try      
+    {      
+        dataStream->StartAcquisition(peak::core::AcquisitionStartMode::Default, 1);      
+        nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("AcquisitionStart")->Execute();      
+    }      
+    catch (const std::exception &e)      
+    {      
+        LOGF_ERROR("Failed to start acquisition: %s", e.what());      
+        return false;      
+    }      
+      
+    gettimeofday(&ExpStart, nullptr);      
+    PrimaryCCD.setExposureDuration(duration);      
+    InExposure = true;      
+      
+    LOGF_INFO("Starting %.3f second exposure (%s mode).", duration, targetUserSet.c_str());      
+      
+    // Signal imaging thread to handle exposure monitoring    
+    pthread_mutex_lock(&condMutex);    
+    m_ThreadRequest = StateExposure;    
+    pthread_cond_signal(&cv);    
+    pthread_mutex_unlock(&condMutex);    
+      
+    SetTimer(getCurrentPollingPeriod());      
+      
+    return true;      
 }
 
 std::string IDS_CCD::determineUserSetForDuration(float duration)  
@@ -1158,6 +1180,20 @@ int IDS_CCD::grabImage()
         PixelFormatInfo &fmtInfo = it->second;  
         uint8_t *src = static_cast<uint8_t *>(image.Data());  
         uint8_t *dst = PrimaryCCD.getFrameBuffer();  
+        
+        size_t expectedSize = (fmtInfo.bitsPerPixel / 8) * imgWidth * imgHeight;  
+  
+        if (!dst || expectedSize == 0) {  
+            LOGF_ERROR("Invalid buffer: dst=%p, expectedSize=%zu", dst, expectedSize);  
+            stopAcquisition();  
+            dataStream->QueueBuffer(buffer);  
+            return false;  
+        }  
+          
+        LOGF_DEBUG("Processing image: %ux%u, %u bpp, buffer size: %zu",   
+                   imgWidth, imgHeight, fmtInfo.bitsPerPixel, expectedSize);  
+
+        
   
         // 5. Apply Conversion/Expansion via the Map  
         if (fmtInfo.expandFunc)  
@@ -1171,6 +1207,9 @@ int IDS_CCD::grabImage()
             size_t size = (fmtInfo.bitsPerPixel / 8) * imgWidth * imgHeight;  
             memcpy(dst, src, size);  
         }  
+  
+        LOGF_DEBUG("Calling ExposureComplete with buffer at %p, size %zu",   
+           dst, expectedSize);  
   
         // 6. Finalize INDI state  
         PrimaryCCD.setBPP(fmtInfo.bitsPerPixel);  
@@ -1267,6 +1306,19 @@ bool IDS_CCD::ISNewNumber(const char *dev, const char *name, double values[], ch
 {
     if (dev != nullptr && strcmp(dev, getDeviceName()) == 0)
     {
+    
+        // EXPOSURE CONTROL - Add this section  
+        if (!strcmp(name, "CCD_EXPOSURE"))  
+        {  
+            if (values[0] < 0.001 || values[0] > 3600)  
+            {  
+                LOGF_ERROR("Exposure duration %.6f is out of range [0.001, 3600]", values[0]);  
+                return false;  
+            }  
+              
+            return StartExposure(values[0]);  
+        }  
+    
         // Gain Control
         if (HasGain && !strcmp(name, GainNP.getName()))
         {
@@ -1936,190 +1988,417 @@ void IDS_CCD::debugCurrentState()
 
 
 
-void IDS_CCD::queryPixelFormats()        
-{        
-    LOG_INFO("=== queryPixelFormats() ENTRY ===");        
-    LOG_INFO("=== Starting queryPixelFormats() ===");        
-        
-    m_formatMap.clear();        
-    LOG_INFO("after: m_formatMap.clear();");      
-    m_supportedBitDepths.clear();        
-    LOG_INFO("after: m_supportedBitDepths.clear();");      
-    m_compressionSupport.clear();        
-    LOG_INFO("after: m_compressionSupport.clear();");      
-        
-    // Add missing variable declaration    
-    bool supportsCompression = false;    
-        
-    try        
-    {        
-        // Use cached node if available, otherwise find it        
-        LOG_INFO("Checking nodeMapRemoteDevice...(before IF)");       
-        if (!pixelFormatNode) {        
-            LOG_INFO("Querying pixel format node...");         
-            pixelFormatNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");        
-            LOG_INFO("PixelFormat node found successfully");        
-        } else {        
-            LOG_INFO("Using cached PixelFormat node");        
-        }        
-        
-        LOG_INFO("Getting pixel format entries...");        
-        auto allEntries = pixelFormatNode->Entries();        
-        LOGF_INFO("Found %zu pixel format entries", allEntries.size());        
-        
-        // Track supported modes    
-        bool supports8bit  = false;        
-        bool supports10bit = false;        
-        bool supports12bit = false;        
-        bool supports16bit = false;        
-        
-        LOG_INFO("Processing pixel format entries...");        
-        int processedEntries = 0;        
-        for (const auto &entry : allEntries)        
-        {        
-            processedEntries++;        
-            if (processedEntries % 10 == 0) {        
-                LOGF_DEBUG("Processed %d entries so far...", processedEntries);        
-            }        
-        
-            if (entry->AccessStatus() == peak::core::nodes::NodeAccessStatus::NotAvailable ||        
-                entry->AccessStatus() == peak::core::nodes::NodeAccessStatus::NotImplemented)        
-            {        
-                continue;        
-            }        
-        
-            std::string formatName = entry->SymbolicValue();        
-            LOGF_DEBUG("Processing format: %s", formatName.c_str());        
-        
-            // Only include mono formats        
-            if (formatName.find("Mono") == 0)        
-            {        
-                // Check bit depth support and populate format map      
-                if (formatName == "Mono8")        
-                {        
-                    supports8bit = true;      
-                    m_formatMap["Mono8"] = PixelFormatInfo(      
-                        "Mono8",           // idsName      
-                        "Mono8",           // indiName      
-                        8,                 // bitsPerPixel      
-                        false,             // packed     
-                        false,             // isDefault    
-                        nullptr            // expandFunc      
-                    );      
-                    LOGF_INFO("Available: 8-bit uncompressed (%s)", formatName.c_str());        
-                }        
-                else if (formatName == "Mono8p")        
-                {        
-                    supports8bit = true;      
-                    supportsCompression = true;      
-                    m_compressionSupport[8] = true;      
-                    m_formatMap["Mono8_Packed"] = PixelFormatInfo(      
-                        "Mono8p",           // idsName      
-                        "Mono8_Packed",     // indiName      
-                        8,                 // bitsPerPixel      
-                        true,              // packed      
-                        false,             // isDefault    
-                        nullptr            // expandFunc      
-                    );      
-                    LOGF_INFO("Available: 8-bit compressed (%s)", formatName.c_str());        
-                }        
-                else if (formatName == "Mono10")        
-                {        
-                    supports10bit = true;      
-                    // For Mono10 uncompressed      
-                    m_formatMap["Mono10"] = PixelFormatInfo(        
-                        "Mono10",           // idsName        
-                        "Mono10",           // indiName        
+//void IDS_CCD::queryPixelFormats()        
+//{        
+//    LOG_INFO("=== queryPixelFormats() ENTRY ===");        
+//    LOG_INFO("=== Starting queryPixelFormats() ===");        
+//        
+//    m_formatMap.clear();        
+//    LOG_INFO("after: m_formatMap.clear();");      
+//    m_supportedBitDepths.clear();        
+//    LOG_INFO("after: m_supportedBitDepths.clear();");      
+//    m_compressionSupport.clear();        
+//    LOG_INFO("after: m_compressionSupport.clear();");      
+//        
+//    // Add missing variable declaration    
+//    bool supportsCompression = false;    
+//        
+//    try        
+//    {        
+//        // Use cached node if available, otherwise find it        
+//        LOG_INFO("Checking nodeMapRemoteDevice...(before IF)");       
+//        if (!pixelFormatNode) {        
+//            LOG_INFO("Querying pixel format node...");         
+//            pixelFormatNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");        
+//            LOG_INFO("PixelFormat node found successfully");        
+//        } else {        
+//            LOG_INFO("Using cached PixelFormat node");        
+//        }        
+//        
+//        LOG_INFO("Getting pixel format entries...");        
+//        auto allEntries = pixelFormatNode->Entries();        
+//        LOGF_INFO("Found %zu pixel format entries", allEntries.size());        
+//        
+//        // Track supported modes    
+//        bool supports8bit  = false;        
+//        bool supports10bit = false;        
+//        bool supports12bit = false;        
+//        bool supports16bit = false;        
+//        
+//        LOG_INFO("Processing pixel format entries...");        
+//        int processedEntries = 0;        
+//        for (const auto &entry : allEntries)        
+//        {        
+//            processedEntries++;        
+//            if (processedEntries % 10 == 0) {        
+//                LOGF_DEBUG("Processed %d entries so far...", processedEntries);        
+//            }        
+//        
+//            if (entry->AccessStatus() == peak::core::nodes::NodeAccessStatus::NotAvailable ||        
+//                entry->AccessStatus() == peak::core::nodes::NodeAccessStatus::NotImplemented)        
+//            {        
+//                continue;        
+//            }        
+//        
+//            std::string formatName = entry->SymbolicValue();        
+//            LOGF_DEBUG("Processing format: %s", formatName.c_str());        
+//        
+//            // Only include mono formats        
+//            if (formatName.find("Mono") == 0)        
+//            {        
+//                // Check bit depth support and populate format map      
+//                if (formatName == "Mono8")        
+//                {        
+//                    supports8bit = true;      
+//                    m_formatMap["Mono8"] = PixelFormatInfo(      
+//                        "Mono8",           // idsName      
+//                        "Mono8",           // indiName      
+//                        8,                 // bitsPerPixel      
+//                        false,             // packed     
+//                        false,             // isDefault    
+//                        nullptr            // expandFunc      
+//                    );      
+//                    LOGF_INFO("Available: 8-bit uncompressed (%s)", formatName.c_str());        
+//                }        
+//                else if (formatName == "Mono8p")        
+//                {        
+//                    supports8bit = true;      
+//                    supportsCompression = true;      
+//                    m_compressionSupport[8] = true;      
+//                    m_formatMap["Mono8_Packed"] = PixelFormatInfo(      
+//                        "Mono8p",           // idsName      
+//                        "Mono8_Packed",     // indiName      
+//                        8,                 // bitsPerPixel      
+//                        true,              // packed      
+//                        false,             // isDefault    
+//                        nullptr            // expandFunc      
+//                    );      
+//                    LOGF_INFO("Available: 8-bit compressed (%s)", formatName.c_str());        
+//                }        
+//                else if (formatName == "Mono10")        
+//                {        
+//                    supports10bit = true;      
+//                    // For Mono10 uncompressed      
+//                    m_formatMap["Mono10"] = PixelFormatInfo(        
+//                        "Mono10",           // idsName        
+//                        "Mono10",           // indiName        
+//                        16,                // bitsPerPixel        
+//                        false,             // packed    
+//                        false,             // isDefault    
+//                        [this](const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {        
+//                            expand10bitTo16bit(src, dst, w, h);  // Remove extra parameter  
+//                        }         
+//                    );       
+//                    LOGF_INFO("Available: 10-bit uncompressed (%s)", formatName.c_str());        
+//                }        
+//                else if (formatName == "Mono10p")        
+//                {        
+//                    supports10bit = true;      
+//                    supportsCompression = true;      
+//                    m_compressionSupport[10] = true;      
+//                    m_formatMap["Mono10_Packed"] = PixelFormatInfo(      
+//                        "Mono10p",           // idsName      
+//                        "Mono10_Packed",     // indiName      
+//                        16,                // bitsPerPixel      
+//                        true,              // packed      
+//                        false,             // isDefault    
+//                        [this](const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {      
+//                            expand10bitTo16bit(src, dst, w, h);  // Remove extra parameter  
+//                        }      
+//                    );      
+//                    LOGF_INFO("Available: 10-bit compressed (%s)", formatName.c_str());        
+//                }        
+//                else if (formatName == "Mono12")        
+//                {        
+//                    supports12bit = true;      
+//                    // For Mono12 uncompressed        
+//                    m_formatMap["Mono12"] = PixelFormatInfo(        
+//                        "Mono12",           // idsName        
+//                        "Mono12",           // indiName        
+//                        16,                // bitsPerPixel        
+//                        false,             // packed     
+//                        false,             // isDefault    
+//                        [this](const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {        
+//                            expand12bitTo16bit(src, dst, w, h);  // Remove extra parameter  
+//                        }       
+//                    );     
+//                    LOGF_INFO("Available: 12-bit uncompressed (%s)", formatName.c_str());        
+//                }        
+//                else if (formatName == "Mono12p")        
+//                {        
+//                    supports12bit = true;      
+//                    supportsCompression = true;      
+//                    m_compressionSupport[12] = true;      
+//                    m_formatMap["Mono12_Packed"] = PixelFormatInfo(      
+//                        "Mono12p",           // idsName      
+//                        "Mono12_Packed",     // indiName      
+//                        16,                // bitsPerPixel      
+//                        true,              // packed        
+//                        false,             // isDefault    
+//                        [this](const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {      
+//                            expand12bitTo16bit(src, dst, w, h);  // Remove extra parameter  
+//                        }      
+//                    );      
+//                    LOGF_INFO("Available: 12-bit compressed (%s)", formatName.c_str());        
+//                }        
+//            }         
+//        }        
+//        
+//        LOG_INFO("Finished processing entries, creating summary...");        
+//        
+//        // -------------------------        
+//        // Bit depth summary        
+//        // -------------------------        
+//        if (supports8bit)  m_supportedBitDepths.push_back(8);        
+//        if (supports10bit) m_supportedBitDepths.push_back(10);        
+//        if (supports12bit) m_supportedBitDepths.push_back(12);        
+//        if (supports16bit) m_supportedBitDepths.push_back(16);        
+//        
+//        m_maxBitDepth = 8;        
+//        if (supports10bit) m_maxBitDepth = 10;        
+//        if (supports12bit) m_maxBitDepth = 12;        
+//        if (supports16bit) m_maxBitDepth = 16;        
+//        
+//        LOGF_INFO("Camera supports %zu pixel formats. Max depth: %d",        
+//                  m_formatMap.size(), m_maxBitDepth);        
+//        LOG_INFO("=== queryPixelFormats() completed successfully ===");        
+//    }        
+//    catch (const std::exception &e)        
+//    {        
+//        LOGF_ERROR("Failed to query pixel formats: %s", e.what());        
+//        LOG_INFO("Setting fallback Mono8 format...");        
+//        // Explicit Constructor Call in catch block        
+//        m_formatMap["Mono8"] = PixelFormatInfo("Mono8", "Mono8", 8, false, false, nullptr);        
+//        m_supportedBitDepths.push_back(8);        
+//        m_maxBitDepth = 8;        
+//    }        
+//}
+
+void IDS_CCD::queryPixelFormats()          
+{          
+    LOG_INFO("=== queryPixelFormats() ENTRY ===");          
+    LOG_INFO("=== Starting queryPixelFormats() ===");          
+          
+    m_formatMap.clear();          
+    LOG_INFO("after: m_formatMap.clear();");        
+    m_supportedBitDepths.clear();          
+    LOG_INFO("after: m_supportedBitDepths.clear();");        
+    m_compressionSupport.clear();          
+    LOG_INFO("after: m_compressionSupport.clear();");          
+          
+    // Add missing variable declaration      
+    bool supportsCompression = false;          
+          
+    try          
+    {          
+        // Use cached node if available, otherwise find it          
+        LOG_INFO("Checking nodeMapRemoteDevice...(before IF)");         
+        if (!pixelFormatNode) {          
+            LOG_INFO("Querying pixel format node...");           
+            pixelFormatNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");          
+            LOG_INFO("PixelFormat node found successfully");          
+        } else {          
+            LOG_INFO("Using cached PixelFormat node");          
+        }          
+          
+        LOG_INFO("Getting pixel format entries...");          
+        auto allEntries = pixelFormatNode->Entries();          
+        LOGF_INFO("Found %zu pixel format entries", allEntries.size());          
+          
+        // Track supported modes      
+        bool supports8bit  = false;          
+        bool supports10bit = false;          
+        bool supports12bit = false;          
+        bool supports16bit = false;          
+          
+        LOG_INFO("Processing pixel format entries...");          
+        int processedEntries = 0;          
+        for (const auto &entry : allEntries)          
+        {          
+            processedEntries++;          
+            if (processedEntries % 10 == 0) {          
+                LOGF_DEBUG("Processed %d entries so far...", processedEntries);          
+            }          
+          
+            if (entry->AccessStatus() == peak::core::nodes::NodeAccessStatus::NotAvailable ||          
+                entry->AccessStatus() == peak::core::nodes::NodeAccessStatus::NotImplemented)          
+            {          
+                continue;          
+            }          
+          
+            std::string formatName = entry->SymbolicValue();          
+            LOGF_DEBUG("Processing format: %s", formatName.c_str());          
+          
+            // Handle both Mono and Bayer formats  
+            bool isMono = (formatName.find("Mono") == 0);  
+            bool isBayer = (formatName.find("Bayer") != std::string::npos);  
+              
+            if (!isMono && !isBayer) continue;  
+              
+            // Process Mono formats  
+            if (isMono)  
+            {          
+                // Check bit depth support and populate format map        
+                if (formatName == "Mono8")          
+                {          
+                    supports8bit = true;        
+                    m_formatMap["Mono8"] = PixelFormatInfo(        
+                        "Mono8",           // idsName        
+                        "Mono8",           // indiName        
+                        8,                 // bitsPerPixel        
+                        false,             // packed       
+                        false,             // isDefault      
+                        nullptr            // expandFunc        
+                    );        
+                    LOGF_INFO("Available: 8-bit uncompressed (%s)", formatName.c_str());          
+                }          
+                else if (formatName == "Mono8p")          
+                {          
+                    supports8bit = true;        
+                    supportsCompression = true;        
+                    m_compressionSupport[8] = true;        
+                    m_formatMap["Mono8_Packed"] = PixelFormatInfo(        
+                        "Mono8p",           // idsName        
+                        "Mono8_Packed",     // indiName        
+                        8,                 // bitsPerPixel        
+                        true,              // packed        
+                        false,             // isDefault      
+                        nullptr            // expandFunc        
+                    );        
+                    LOGF_INFO("Available: 8-bit compressed (%s)", formatName.c_str());          
+                }          
+                else if (formatName == "Mono10")          
+                {          
+                    supports10bit = true;        
+                    // For Mono10 uncompressed        
+                    m_formatMap["Mono10"] = PixelFormatInfo(          
+                        "Mono10",           // idsName          
+                        "Mono10",           // indiName          
+                        16,                // bitsPerPixel          
+                        false,             // packed      
+                        false,             // isDefault      
+                        [this](const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {          
+                            expand10bitTo16bit(src, dst, w, h);  // Remove extra parameter    
+                        }           
+                    );         
+                    LOGF_INFO("Available: 10-bit uncompressed (%s)", formatName.c_str());          
+                }          
+                else if (formatName == "Mono10p")          
+                {          
+                    supports10bit = true;        
+                    supportsCompression = true;        
+                    m_compressionSupport[10] = true;        
+                    m_formatMap["Mono10_Packed"] = PixelFormatInfo(        
+                        "Mono10p",           // idsName        
+                        "Mono10_Packed",     // indiName        
                         16,                // bitsPerPixel        
-                        false,             // packed    
-                        false,             // isDefault    
+                        true,              // packed        
+                        false,             // isDefault      
                         [this](const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {        
-                            expand10bitTo16bit(src, dst, w, h);  // Remove extra parameter  
+                            expand10bitTo16bit(src, dst, w, h);  // Remove extra parameter    
+                        }        
+                    );        
+                    LOGF_INFO("Available: 10-bit compressed (%s)", formatName.c_str());          
+                }          
+                else if (formatName == "Mono12")          
+                {          
+                    supports12bit = true;        
+                    // For Mono12 uncompressed          
+                    m_formatMap["Mono12"] = PixelFormatInfo(          
+                        "Mono12",           // idsName          
+                        "Mono12",           // indiName          
+                        16,                // bitsPerPixel          
+                        false,             // packed       
+                        false,             // isDefault      
+                        [this](const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {          
+                            expand12bitTo16bit(src, dst, w, h);  // Remove extra parameter    
                         }         
                     );       
-                    LOGF_INFO("Available: 10-bit uncompressed (%s)", formatName.c_str());        
-                }        
-                else if (formatName == "Mono10p")        
-                {        
-                    supports10bit = true;      
-                    supportsCompression = true;      
-                    m_compressionSupport[10] = true;      
-                    m_formatMap["Mono10_Packed"] = PixelFormatInfo(      
-                        "Mono10p",           // idsName      
-                        "Mono10_Packed",     // indiName      
-                        16,                // bitsPerPixel      
-                        true,              // packed      
-                        false,             // isDefault    
-                        [this](const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {      
-                            expand10bitTo16bit(src, dst, w, h);  // Remove extra parameter  
-                        }      
-                    );      
-                    LOGF_INFO("Available: 10-bit compressed (%s)", formatName.c_str());        
-                }        
-                else if (formatName == "Mono12")        
-                {        
-                    supports12bit = true;      
-                    // For Mono12 uncompressed        
-                    m_formatMap["Mono12"] = PixelFormatInfo(        
-                        "Mono12",           // idsName        
-                        "Mono12",           // indiName        
+                    LOGF_INFO("Available: 12-bit uncompressed (%s)", formatName.c_str());          
+                }          
+                else if (formatName == "Mono12p")          
+                {          
+                    supports12bit = true;        
+                    supportsCompression = true;        
+                    m_compressionSupport[12] = true;        
+                    m_formatMap["Mono12_Packed"] = PixelFormatInfo(        
+                        "Mono12p",           // idsName        
+                        "Mono12_Packed",     // indiName        
                         16,                // bitsPerPixel        
-                        false,             // packed     
-                        false,             // isDefault    
+                        true,              // packed          
+                        false,             // isDefault      
                         [this](const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {        
-                            expand12bitTo16bit(src, dst, w, h);  // Remove extra parameter  
-                        }       
-                    );     
-                    LOGF_INFO("Available: 12-bit uncompressed (%s)", formatName.c_str());        
-                }        
-                else if (formatName == "Mono12p")        
-                {        
-                    supports12bit = true;      
-                    supportsCompression = true;      
-                    m_compressionSupport[12] = true;      
-                    m_formatMap["Mono12_Packed"] = PixelFormatInfo(      
-                        "Mono12p",           // idsName      
-                        "Mono12_Packed",     // indiName      
-                        16,                // bitsPerPixel      
-                        true,              // packed        
+                            expand12bitTo16bit(src, dst, w, h);  // Remove extra parameter    
+                        }        
+                    );        
+                    LOGF_INFO("Available: 12-bit compressed (%s)", formatName.c_str());          
+                }          
+            }  
+            // Process Bayer formats    
+            else if (isBayer)    
+            {    
+                // Extract bit depth from format name    
+                int bitDepth = 8; // default    
+                if (formatName.find("8") != std::string::npos) bitDepth = 8;    
+                else if (formatName.find("10") != std::string::npos) bitDepth = 10;    
+                else if (formatName.find("12") != std::string::npos) bitDepth = 12;    
+                else if (formatName.find("16") != std::string::npos) bitDepth = 16;    
+                    
+                // Update support flags    
+                if (bitDepth == 8) supports8bit = true;    
+                else if (bitDepth == 10) supports10bit = true;    
+                else if (bitDepth == 12) supports12bit = true;    
+                else if (bitDepth == 16) supports16bit = true;    
+                    
+                // Create INDI format name    
+                std::string bayerPattern = mapCameraFormatToBayerPattern(formatName);    
+                if (!bayerPattern.empty()) {    
+                    std::string indiFormat = "INDI_BAYER_" + bayerPattern;    
+                        
+                    // FIX: Use camera format name as key, not INDI format name  
+                    m_formatMap[formatName] = PixelFormatInfo(    
+                        formatName,        // idsName - camera format    
+                        indiFormat,        // indiName - INDI format    
+                        bitDepth,          // bitsPerPixel    
+                        false,             // packed    
                         false,             // isDefault    
-                        [this](const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {      
-                            expand12bitTo16bit(src, dst, w, h);  // Remove extra parameter  
-                        }      
-                    );      
-                    LOGF_INFO("Available: 12-bit compressed (%s)", formatName.c_str());        
-                }        
+                        nullptr            // expandFunc    
+                    );    
+                        
+                    LOGF_INFO("Available: Bayer format (%s -> %s)", formatName.c_str(), indiFormat.c_str());    
+                }    
             }         
-        }        
+        }          
+          
+        LOG_INFO("Finished processing entries, creating summary...");    
         
-        LOG_INFO("Finished processing entries, creating summary...");        
-        
-        // -------------------------        
-        // Bit depth summary        
-        // -------------------------        
-        if (supports8bit)  m_supportedBitDepths.push_back(8);        
-        if (supports10bit) m_supportedBitDepths.push_back(10);        
-        if (supports12bit) m_supportedBitDepths.push_back(12);        
-        if (supports16bit) m_supportedBitDepths.push_back(16);        
-        
-        m_maxBitDepth = 8;        
-        if (supports10bit) m_maxBitDepth = 10;        
-        if (supports12bit) m_maxBitDepth = 12;        
-        if (supports16bit) m_maxBitDepth = 16;        
-        
-        LOGF_INFO("Camera supports %zu pixel formats. Max depth: %d",        
-                  m_formatMap.size(), m_maxBitDepth);        
-        LOG_INFO("=== queryPixelFormats() completed successfully ===");        
-    }        
-    catch (const std::exception &e)        
-    {        
-        LOGF_ERROR("Failed to query pixel formats: %s", e.what());        
-        LOG_INFO("Setting fallback Mono8 format...");        
-        // Explicit Constructor Call in catch block        
-        m_formatMap["Mono8"] = PixelFormatInfo("Mono8", "Mono8", 8, false, false, nullptr);        
-        m_supportedBitDepths.push_back(8);        
-        m_maxBitDepth = 8;        
-    }        
+         
+        // -------------------------          
+        // Bit depth summary          
+        // -------------------------          
+        if (supports8bit)  m_supportedBitDepths.push_back(8);          
+        if (supports10bit) m_supportedBitDepths.push_back(10);          
+        if (supports12bit) m_supportedBitDepths.push_back(12);          
+        if (supports16bit) m_supportedBitDepths.push_back(16);          
+          
+        m_maxBitDepth = 8;          
+        if (supports10bit) m_maxBitDepth = 10;          
+        if (supports12bit) m_maxBitDepth = 12;          
+        if (supports16bit) m_maxBitDepth = 16;          
+          
+        LOGF_INFO("Camera supports %zu pixel formats. Max depth: %d",          
+                  m_formatMap.size(), m_maxBitDepth);          
+        LOG_INFO("=== queryPixelFormats() completed successfully ===");          
+    }          
+    catch (const std::exception &e)          
+    {          
+        LOGF_ERROR("Failed to query pixel formats: %s", e.what());          
+        LOG_INFO("Setting fallback Mono8 format...");          
+        // Explicit Constructor Call in catch block          
+        m_formatMap["Mono8"] = PixelFormatInfo("Mono8", "Mono8", 8, false, false, nullptr);          
+        m_supportedBitDepths.push_back(8);          
+        m_maxBitDepth = 8;          
+    }          
 }
 
 bool IDS_CCD::SetCaptureFormat(uint8_t index)      
@@ -2220,32 +2499,18 @@ void IDS_CCD::allocateFrameBuffer()
         isBayer = (currentFormat.find("Bayer") != std::string::npos);  
     }  
       
-    // Calculate buffer size - Bayer formats are single channel like mono  
-    size_t bufferSize;  
-    if (isBayer)  
-    {  
-        // For Bayer formats, use 1 byte per pixel for 8-bit, 2 bytes for 16-bit  
-        if (currentFormat.find("8") != std::string::npos)  
-            bufferSize = width * height * 1;  
-        else if (currentFormat.find("16") != std::string::npos)  
-            bufferSize = width * height * 2;  
-        else  
-            bufferSize = width * height * 1; // default to 8-bit  
-    }  
-    else  
-    {  
-        // For mono formats  
-        auto it = m_formatMap.find(currentFormat);  
-        if (it != m_formatMap.end())  
-        {  
-            uint8_t bpp = it->second.bitsPerPixel;  
-            bufferSize = (width * height * bpp) / 8;  
-        }  
-        else  
-        {  
-            bufferSize = width * height; // default to 8-bit  
-        }  
-    }  
+    // Calculate buffer size using format map for all formats  
+    size_t bufferSize;
+    auto it = m_formatMap.find(currentFormat);  
+    if (it != m_formatMap.end()) {  
+        uint8_t bpp = it->second.bitsPerPixel;  
+        bufferSize = (width * height * bpp) / 8;  
+        LOGF_DEBUG("Buffer size calculated using format map: %s -> %d bpp",   
+                   currentFormat.c_str(), bpp);  
+    } else {  
+        LOGF_ERROR("Unknown format: %s", currentFormat.c_str());  
+        return;  
+    }
       
     // Use the larger of calculated size or actual payload  
     if (bufferSize < actualPayloadSize)  
@@ -2735,21 +3000,20 @@ bool IDS_CCD::setupParams()
             std::string targetFormat;          
             bool formatFound = false;          
                               
-            // Determine target format based on camera capabilities          
-
-            for (const auto &entry : pixelFormatNode->Entries())
-            {
-                std::string name = entry->SymbolicValue();
-
-                if (entry->IsAvailable() && entry->IsWriteable())
-                {
-                    if (name.find("Bayer") != std::string::npos)
-                    {
-                        targetFormat = name;
-                        formatFound = true;
-                        break;
-                    }
-                }
+            // Check for both Bayer and Mono formats  
+            for (const auto &entry : pixelFormatNode->Entries()) {  
+                std::string name = entry->SymbolicValue();  
+                if (entry->IsAvailable() && entry->IsWriteable()) {  
+                    if (m_hasBayer && name.find("Bayer") != std::string::npos) {  
+                        targetFormat = name;  
+                        formatFound = true;  
+                        break;  
+                    } else if (name.find("Mono") == 0) {  
+                        targetFormat = name;  
+                        // Continue looking for Bayer if supported  
+                        if (!m_hasBayer) break;  
+                    }  
+                }  
             }
 
             if (!formatFound)
@@ -2828,6 +3092,9 @@ bool IDS_CCD::setupParams()
                 LOGF_ERROR("Failed to restart acquisition after format change: %s", e.what());
                 return false;
             }   
+            
+            allocateFrameBuffer();  
+            LOG_INFO("Frame buffer allocated after pixel format configuration");
         }        
         catch (const std::exception &e)            
         {            
@@ -2853,8 +3120,8 @@ bool IDS_CCD::setupParams()
         if (PrimaryCCD.getSubW() == 0)    
         {    
             PrimaryCCD.setFrame(0, 0, cameraWidth, cameraHeight);    
-            LOG_INFO("before: allocateFrameBuffer(); ");
-            allocateFrameBuffer();  
+            //LOG_INFO("before: allocateFrameBuffer(); ");
+            //allocateFrameBuffer();  
         }    
   
         // Setup Gain if supported  
