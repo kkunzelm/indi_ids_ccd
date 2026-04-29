@@ -727,8 +727,8 @@ bool IDS_CCD::configureExposure(float duration)
   
         // Get current limits (already in microseconds from the camera)
         // Convert to seconds for validation against the INDI 'duration'
-        double minExposureSec = exposureNode->Minimum() / IDSConstants::MICROSEC_PER_SEC;  
-        double maxExposureSec = exposureNode->Maximum() / IDSConstants::MICROSEC_PER_SEC;  
+        double minExposureSec = exposureNode->Minimum() / IDSConstants::MICROSECONDS_PER_SECOND;  
+        double maxExposureSec = exposureNode->Maximum() / IDSConstants::MICROSECONDS_PER_SECOND;  
   
         // Validate exposure time  
         if (duration < minExposureSec)  
@@ -742,9 +742,9 @@ bool IDS_CCD::configureExposure(float duration)
             return false;  
         }  
   
-        // FIX 10: Convert seconds (INDI) to microseconds (Camera) 
+        // Convert seconds (INDI) to microseconds (Camera) 
         // using our defined constant instead of a raw number
-        double exposureMicros = static_cast<double>(duration) * IDSConstants::MICROSEC_PER_SEC;  
+        double exposureMicros = static_cast<double>(duration) * IDSConstants::MICROSECONDS_PER_SECOND;  
         
         exposureNode->SetValue(exposureMicros);  
           
@@ -1104,12 +1104,12 @@ float IDS_CCD::CalcTimeLeft()
     // Calculate start time in SECONDS
     double time_start_sec = 
         static_cast<double>(ExpStart.tv_sec) + 
-        static_cast<double>(ExpStart.tv_usec) / IDSConstants::MICROSEC_PER_SEC;
+        static_cast<double>(ExpStart.tv_usec) / IDSConstants::MICROSECONDS_PER_SECOND;
 
     // Calculate current time in SECONDS
     double time_now_sec = 
         static_cast<double>(now.tv_sec) + 
-        static_cast<double>(now.tv_usec) / IDSConstants::MICROSEC_PER_SEC;
+        static_cast<double>(now.tv_usec) / IDSConstants::MICROSECONDS_PER_SECOND;
     
     // Calculate the difference in SECONDS
     double timesince = time_now_sec - time_start_sec; 
@@ -1940,13 +1940,13 @@ bool IDS_CCD::queryExposureLimits()
     {    
         if (!exposureNode)  
              exposureNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("ExposureTime");  
-        minExposure = exposureNode->Minimum() / IDSConstants::MICROSEC_PER_SEC; // Convert to seconds    
-        maxExposure = exposureNode->Maximum() / IDSConstants::MICROSEC_PER_SEC;    
+        minExposure = exposureNode->Minimum() / IDSConstants::MICROSECONDS_PER_SECOND; // Convert to seconds    
+        maxExposure = exposureNode->Maximum() / IDSConstants::MICROSECONDS_PER_SECOND;    
             
         // Query exposure increment    
         if (exposureNode->HasConstantIncrement())    
         {    
-            exposureStep = exposureNode->Increment() / IDSConstants::MICROSEC_PER_SEC; // Convert to seconds    
+            exposureStep = exposureNode->Increment() / IDSConstants::MICROSECONDS_PER_SECOND; // Convert to seconds    
         }    
         else    
         {    
