@@ -157,6 +157,15 @@ private:
     void allocateFrameBuffer();    
     void cleanupConnection();    
     void addCaptureFormat(const PixelFormatInfo &format);  
+
+    template <typename NodeT>
+    std::shared_ptr<NodeT> getNode(std::shared_ptr<NodeT>& cache, const char* name)
+    {
+        if (!cache && nodeMapRemoteDevice)
+            cache = nodeMapRemoteDevice->FindNode<NodeT>(name);
+
+        return cache;
+    }
     
     // BAYER HELPER FUNCTIONS  
     std::string mapCameraFormatToBayerPattern(const std::string& formatName);  
