@@ -441,8 +441,7 @@ void IDS_CCD::cleanupConnection()
     }
     
     // Reset user set cache  
-    m_userSetsQueried = false;  
-    m_availableUserSets.clear();  
+    userSetManager.reset();  
 
     LOG_INFO("IDS camera disconnected.");
     
@@ -657,8 +656,7 @@ bool IDS_CCD::initCamera()
             return false;
         }
 
-        userSetNode =
-            nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("UserSetSelector");
+        queryAvailableUserSets();
 
         try
         {
@@ -744,53 +742,13 @@ const char *IDS_CCD::getDefaultName()
     return "IDS CCD";
 }
 
-std::vector<std::string> IDS_CCD::queryAvailableUserSets()    
-{    
-    std::vector<std::string> userSets;    
-        
-    try    
-    {    
-        auto selector = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("UserSetSelector");    
-        if (!selector)    
-        {    
-            LOG_ERROR("UserSetSelector not available");    
-            return userSets;    
-        }    
-            
-        // Get all entries and check their access status  
-        auto entries = selector->Entries();    
-        for (const auto& entry : entries)    
-        {    
-            try    
-            {    
-                // Check if entry is accessible using AccessStatus()  
-                if ((peak::core::nodes::NodeAccessStatus::NotAvailable != entry->AccessStatus()) &&  
-                    (peak::core::nodes::NodeAccessStatus::NotImplemented != entry->AccessStatus()))    
-                {    
-                    std::string entryName = entry->SymbolicValue();    
-                    userSets.push_back(entryName);    
-                    LOGF_DEBUG("Found accessible user set: %s", entryName.c_str());    
-                }    
-                else    
-                {    
-                    LOGF_DEBUG("Skipping non-accessible user set: %s (status: %d)",   
-                               entry->SymbolicValue().c_str(), static_cast<int>(entry->AccessStatus()));    
-                }    
-            }    
-            catch (const std::exception &e)    
-            {    
-                LOGF_DEBUG("User set entry is not accessible: %s", e.what());    
-            }    
-        }    
-            
-        LOGF_INFO("Camera has %zu writable user sets available", userSets.size());    
-    }    
-    catch (const std::exception &e)    
-    {    
-        LOGF_ERROR("Failed to query user sets: %s", e.what());    
-    }    
-        
-    return userSets;    
+std::vector<std::string> IDS_CCD::queryAvailableUserSets()
+{
+    const auto logDebug = [this](const std::string &message) { LOGF_DEBUG("%s", message.c_str()); };
+    const auto logInfo = [this](const std::string &message) { LOGF_INFO("%s", message.c_str()); };
+    const auto logError = [this](const std::string &message) { LOGF_ERROR("%s", message.c_str()); };
+
+    return userSetManager.queryAvailable(nodeMapRemoteDevice, logDebug, logInfo, logError);
 }
   
 void IDS_CCD::queryCameraCapabilities()
@@ -1216,15 +1174,13 @@ bool IDS_CCD::StartExposure(float duration)
     std::string targetUserSet = determineUserSetForDuration(duration);
 
     // Switch user set if needed
-    if (targetUserSet != currentUserSet)
+    if (!userSetManager.isCurrent(targetUserSet))
     {
         if (!switchUserSet(targetUserSet))
         {
             LOG_ERROR("Failed to switch exposure mode");
             return false;
         }
-
-        currentUserSet = targetUserSet;
     }
 
     // Configure exposure after possible user-set switch
@@ -1275,53 +1231,18 @@ bool IDS_CCD::StartExposure(float duration)
     return true;
 }
 
-std::string IDS_CCD::determineUserSetForDuration(float duration)  
-{  
-    // Get available user sets  
-    if (!m_userSetsQueried)
-    {
-        m_availableUserSets = queryAvailableUserSets();
-        m_userSetsQueried = true;
-    }
+std::string IDS_CCD::determineUserSetForDuration(float duration)
+{
+    const auto logDebug = [this](const std::string &message) { LOGF_DEBUG("%s", message.c_str()); };
+    const auto logInfo = [this](const std::string &message) { LOGF_INFO("%s", message.c_str()); };
+    const auto logError = [this](const std::string &message) { LOGF_ERROR("%s", message.c_str()); };
 
-    const std::vector<std::string> &availableUserSets = m_availableUserSets;
-      
-    if (availableUserSets.empty())  
-    {  
-        LOG_ERROR("No user sets available");  
-        return "Default"; // Fallback  
-    }  
-      
-    // Log the requested exposure duration  
-    LOGF_DEBUG("Determining user set for exposure duration: %.3f seconds", duration);  
-      
-    // If only Default is available, always use it  
-    if (availableUserSets.size() == 1)  
-    {  
-        LOGF_DEBUG("Only one user set available (%s), using it", availableUserSets[0].c_str());  
-        return availableUserSets[0];  
-    }  
-      
-    // Check if LongExposure is available and duration requires it  
-    if (std::find(availableUserSets.begin(), availableUserSets.end(), "LongExposure") != availableUserSets.end())  
-    {  
-        if (duration > longExposureMin)  
-        {  
-            LOGF_INFO("Duration %.3fs exceeds threshold %.3fs, selecting LongExposure mode", duration, longExposureMin);  
-            return "LongExposure";  
-        }  
-    }  
-      
-    // Default to Default mode if available  
-    if (std::find(availableUserSets.begin(), availableUserSets.end(), "Default") != availableUserSets.end())  
-    {  
-        LOGF_DEBUG("Duration %.3fs within threshold %.3fs, selecting Default mode", duration, longExposureMin);  
-        return "Default";  
-    }  
-      
-    // Fallback to first available user set  
-    LOGF_DEBUG("Using first available user set: %s", availableUserSets[0].c_str());  
-    return availableUserSets[0];  
+    return userSetManager.determineForDuration(duration,
+                                               longExposureMin,
+                                               nodeMapRemoteDevice,
+                                               logDebug,
+                                               logInfo,
+                                               logError);
 }
 
 void *IDS_CCD::imagingHelper(void *context)  
@@ -2538,66 +2459,44 @@ bool IDS_CCD::UpdateCCDBin(int binX, int binY)
     }      
 }
 
-bool IDS_CCD::switchUserSet(const std::string &userSet)      
-{   
-    if (currentUserSet == userSet)      
-    {      
-        LOGF_DEBUG("Already in %s mode, skipping switch", userSet.c_str());      
-        return true;      
-    }      
-        
-    // Query user sets only once and cache the result    
-    if (!m_userSetsQueried)      
-    {      
-        m_availableUserSets = queryAvailableUserSets();      
-        m_userSetsQueried = true;      
-    }      
-        
-    // Check if user set is available in cached list    
-    if (std::find(m_availableUserSets.begin(), m_availableUserSets.end(), userSet) == m_availableUserSets.end())      
-    {      
-        LOGF_ERROR("User set '%s' is not available on this camera", userSet.c_str());      
-        LOGF_INFO("Available user sets: %zu", m_availableUserSets.size());      
-        for (const auto& set : m_availableUserSets)      
-        {      
-            LOGF_INFO("  - %s", set.c_str());      
-        }      
-        return false;      
-    }      
-      
-    try      
-    {      
-        LOGF_INFO("Switching from %s to %s UserSet", currentUserSet.c_str(), userSet.c_str());      
-      
-        if (!userSetNode)
-        {
-            userSetNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("UserSetSelector");
-        }
+bool IDS_CCD::switchUserSet(const std::string &userSet)
+{
+    const auto logDebug = [this](const std::string &message) { LOGF_DEBUG("%s", message.c_str()); };
+    const auto logInfo = [this](const std::string &message) { LOGF_INFO("%s", message.c_str()); };
+    const auto logError = [this](const std::string &message) { LOGF_ERROR("%s", message.c_str()); };
 
-        if (!userSetLoadNode)
-        {
-            userSetLoadNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("UserSetLoad");
-        }
+    if (userSetManager.isCurrent(userSet))
+    {
+        LOGF_DEBUG("Already in %s mode, skipping switch", userSet.c_str());
+        return true;
+    }
 
-        if (!userSetNode || !userSetLoadNode)      
-        {      
-            LOG_ERROR("UserSetSelector or UserSetLoad not available");      
-            return false;      
-        }      
-      
-        // Additional check: ensure selector is Writeable    
-        if (!userSetNode->IsWriteable())
-        {      
-            LOG_ERROR("UserSetSelector is not Writeable");      
-            return false;      
-        }      
-      
-        // Store current frame settings AND pixel format      
-        int currentX = PrimaryCCD.getSubX();      
-        int currentY = PrimaryCCD.getSubY();      
-        int currentW = PrimaryCCD.getSubW();      
-        int currentH = PrimaryCCD.getSubH();      
-              
+    const auto &availableUserSets = userSetManager.available(nodeMapRemoteDevice,
+                                                             logDebug,
+                                                             logInfo,
+                                                             logError);
+
+    if (std::find(availableUserSets.begin(), availableUserSets.end(), userSet) == availableUserSets.end())
+    {
+        LOGF_ERROR("User set '%s' is not available on this camera", userSet.c_str());
+        LOGF_INFO("Available user sets: %zu", availableUserSets.size());
+        for (const auto &set : availableUserSets)
+        {
+            LOGF_INFO("  - %s", set.c_str());
+        }
+        return false;
+    }
+
+    try
+    {
+        LOGF_INFO("Switching from %s to %s UserSet", userSetManager.current().c_str(), userSet.c_str());
+
+        // Store current frame settings AND pixel format
+        int currentX = PrimaryCCD.getSubX();
+        int currentY = PrimaryCCD.getSubY();
+        int currentW = PrimaryCCD.getSubW();
+        int currentH = PrimaryCCD.getSubH();
+
         std::string currentFormat;
 
         try
@@ -2621,44 +2520,37 @@ bool IDS_CCD::switchUserSet(const std::string &userSet)
         {
             LOGF_ERROR("Failed to get pixel format: %s", e.what());
             return false;
-        } 
-              
-        // Switch userset with additional error handling      
-        try      
-        {      
-            userSetNode->SetCurrentEntry(userSet);      
-        }      
-        catch (const peak::core::Exception &e)      
-        {      
-            LOGF_ERROR("Failed to set UserSetSelector to %s: %s", userSet.c_str(), e.what());      
-            return false;      
-        }      
-      
-        userSetLoadNode->Execute();      
-      
-        // Wait until the UserSetLoad command has finished    
-        userSetLoadNode->WaitUntilDone();      
-      
-        // Restore the previous pixel format instead of forcing Mono8      
-        try      
-        {      
-           pixelFormatNode->SetCurrentEntry(currentFormat);      
-            LOGF_INFO("Restored pixel format to: %s after userset switch", currentFormat.c_str());      
-      
-            // Verify the format was applied      
-            auto verifyFormat = pixelFormatNode->CurrentEntry()->SymbolicValue();      
-            if (verifyFormat != currentFormat)      
-            {      
-                LOGF_WARN("Could not restore format %s, current is: %s", currentFormat.c_str(), verifyFormat.c_str());      
-            }      
-        }      
-        catch (const std::exception &e)      
-        {      
-            LOGF_WARN("Failed to restore pixel format: %s", e.what());      
-            // Don't fail the switch - continue with whatever format the camera set      
-        }      
-      
-        currentUserSet = userSet;
+        }
+
+        try
+        {
+            if (!userSetManager.load(userSet, nodeMapRemoteDevice, logError))
+                return false;
+        }
+        catch (const peak::core::Exception &e)
+        {
+            LOGF_ERROR("Failed to set UserSetSelector to %s: %s", userSet.c_str(), e.what());
+            return false;
+        }
+
+        // Restore the previous pixel format instead of forcing Mono8
+        try
+        {
+            pixelFormatNode->SetCurrentEntry(currentFormat);
+            LOGF_INFO("Restored pixel format to: %s after userset switch", currentFormat.c_str());
+
+            // Verify the format was applied
+            auto verifyFormat = pixelFormatNode->CurrentEntry()->SymbolicValue();
+            if (verifyFormat != currentFormat)
+            {
+                LOGF_WARN("Could not restore format %s, current is: %s", currentFormat.c_str(), verifyFormat.c_str());
+            }
+        }
+        catch (const std::exception &e)
+        {
+            LOGF_WARN("Failed to restore pixel format: %s", e.what());
+            // Don't fail the switch - continue with whatever format the camera set
+        }
 
         if (currentW <= 0 || currentH <= 0)
         {
@@ -2671,14 +2563,15 @@ bool IDS_CCD::switchUserSet(const std::string &userSet)
             LOG_WARN("UserSet switched, but frame restore failed.");
         }
 
-        return true; 
-    }      
-    catch (const peak::core::Exception &e)      
-    {      
-        LOGF_ERROR("Failed to switch UserSet to %s: %s", userSet.c_str(), e.what());      
-        return false;      
-    }      
+        return true;
+    }
+    catch (const peak::core::Exception &e)
+    {
+        LOGF_ERROR("Failed to switch UserSet to %s: %s", userSet.c_str(), e.what());
+        return false;
+    }
 }
+
 
 bool IDS_CCD::queryExposureLimits()
 {

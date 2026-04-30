@@ -7,6 +7,7 @@
 #include <peak_ipl/peak_ipl.hpp>    
 #include "ids_frame_geometry.h"
 #include "ids_temperature_controller.h"
+#include "ids_user_set_manager.h"
 #include <functional>  
 #include <map>  
 #include <string>  
@@ -187,8 +188,6 @@ private:
     std::shared_ptr<peak::core::nodes::IntegerNode> payloadSizeNode;  
     std::shared_ptr<peak::core::nodes::IntegerNode> binningHorizontalNode, binningVerticalNode;
     std::shared_ptr<peak::core::nodes::FloatNode> exposureNode;  
-    std::shared_ptr<peak::core::nodes::EnumerationNode> userSetNode;  
-    std::shared_ptr<peak::core::nodes::CommandNode> userSetLoadNode;
     std::shared_ptr<peak::core::nodes::CommandNode> acquisitionStartNode, acquisitionStopNode;  
     std::shared_ptr<peak::core::nodes::EnumerationNode> acquisitionModeNode;
     std::shared_ptr<peak::core::nodes::FloatNode> gainNode;  
@@ -233,11 +232,9 @@ private:
         
     
     // USER SET MANAGEMENT    
-    std::string currentUserSet = "Default";    
+    IDSUserSetManager userSetManager;
     bool switchUserSet(const std::string& userSet);    
     std::vector<std::string> queryAvailableUserSets();  
-    std::vector<std::string> m_availableUserSets;    
-    bool m_userSetsQueried = false;    
     
     // EXPOSURE LIMITS AND CONFIGURATION    
     std::shared_ptr<peak::core::nodes::FloatNode> findExposureNode();
