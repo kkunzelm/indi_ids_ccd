@@ -27,84 +27,111 @@ static std::mutex sdkInitMutex;
 // Protects all access to idsCCDs while routing INDI callbacks.
 static std::mutex idsCCDsMutex;
 
-
 void ISGetProperties(const char *dev)
 {
+    IDLog("GLOBAL ISGetProperties entered. dev=%s\n",
+          dev ? dev : "ALL_DEVICES");
+
+    bool needInitialize = false;
+
     {
         std::lock_guard<std::mutex> initLock(sdkInitMutex);
+        needInitialize = !sdkInitialized;
+    }
 
-        if (!sdkInitialized)
+    if (needInitialize)
+    {
+        try
         {
-            try
+            IDLog("Initializing IDS Peak library...\n");
+
+            peak::Library::Initialize();
+
+            IDLog("Updating IDS device manager...\n");
+
+            auto &deviceManager = peak::DeviceManager::Instance();
+            deviceManager.Update();
+
+            const auto devices = deviceManager.Devices();
+
+            IDLog("IDS device manager update complete. Found %zu device(s).\n",
+                  devices.size());
+
+            if (devices.empty())
             {
-                peak::Library::Initialize();
+                IDLog("No IDS cameras found on the system.\n");
 
-                auto &deviceManager = peak::DeviceManager::Instance();
-                deviceManager.Update();
+                // Keep sdkInitialized=false so a later getProperties can retry.
+                return;
+            }
 
-                if (deviceManager.Devices().empty())
+            {
+                std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+
+                for (const auto &deviceDescriptor : devices)
                 {
-                    IDLog("No IDS cameras found on the system.\n");
+                    std::string model = deviceDescriptor->ModelName();
+                    std::string sn    = deviceDescriptor->SerialNumber();
+                    std::string uniqueName = model + "-" + sn;
 
-                    // Do not set sdkInitialized=true here if you want a later retry
-                    // when a camera is plugged in after driver startup.
-                    return;
-                }
+                    bool alreadyExists = false;
 
-                {
-                    std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
-
-                    for (const auto &deviceDescriptor : deviceManager.Devices())
+                    for (const auto &cam : idsCCDs)
                     {
-                        std::string model = deviceDescriptor->ModelName();
-                        std::string sn    = deviceDescriptor->SerialNumber();
-                        std::string uniqueName = model + "-" + sn;
-
-                        // Avoid duplicate camera objects if ISGetProperties is called again
-                        // after a partial initialization or retry.
-                        bool alreadyExists = false;
-
-                        for (const auto &cam : idsCCDs)
+                        if (strcmp(cam->getDeviceName(), uniqueName.c_str()) == 0)
                         {
-                            if (strcmp(cam->getDeviceName(), uniqueName.c_str()) == 0)
-                            {
-                                alreadyExists = true;
-                                break;
-                            }
+                            alreadyExists = true;
+                            break;
                         }
-
-                        if (alreadyExists)
-                        {
-                            IDLog("Camera already registered: %s\n", uniqueName.c_str());
-                            continue;
-                        }
-
-                        auto cam = std::make_unique<IDS_CCD>();
-                        cam->setDeviceName(uniqueName.c_str());
-
-                        idsCCDs.push_back(std::move(cam));
-
-                        IDLog("Discovered camera: %s\n", uniqueName.c_str());
                     }
-                }
 
+                    if (alreadyExists)
+                    {
+                        IDLog("Camera already registered: %s\n", uniqueName.c_str());
+                        continue;
+                    }
+
+                    auto cam = std::make_unique<IDS_CCD>();
+                    cam->setDeviceName(uniqueName.c_str());
+
+                    idsCCDs.push_back(std::move(cam));
+
+                    IDLog("Discovered camera: %s\n", uniqueName.c_str());
+                }
+            }
+
+            {
+                std::lock_guard<std::mutex> initLock(sdkInitMutex);
                 sdkInitialized = true;
             }
-            catch (const std::exception &e)
-            {
-                IDLog("IDS SDK Initialization failed: %s\n", e.what());
-            }
+        }
+        catch (const std::exception &e)
+        {
+            IDLog("IDS SDK initialization/discovery failed: %s\n", e.what());
+            return;
         }
     }
 
-    std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+    std::vector<IDS_CCD *> cameras;
 
-    for (auto &cam : idsCCDs)
     {
-        cam->ISGetProperties(dev);
+        std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+
+        for (auto &cam : idsCCDs)
+        {
+            cameras.push_back(cam.get());
+        }
+    }
+
+    IDLog("Forwarding ISGetProperties to %zu IDS camera instance(s).\n",
+          cameras.size());
+
+    for (auto *cam : cameras)
+    {
+        if (cam)
+            cam->ISGetProperties(dev);
     }
 }
-
 
 void ISNewSwitch(const char *dev,
                  const char *name,
@@ -115,16 +142,23 @@ void ISNewSwitch(const char *dev,
     if (dev == nullptr)
         return;
 
-    std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+    IDS_CCD *target = nullptr;
 
-    for (auto &cam : idsCCDs)
     {
-        if (strcmp(dev, cam->getDeviceName()) == 0)
+        std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+
+        for (auto &cam : idsCCDs)
         {
-            cam->ISNewSwitch(dev, name, states, names, n);
-            break;
+            if (strcmp(dev, cam->getDeviceName()) == 0)
+            {
+                target = cam.get();
+                break;
+            }
         }
     }
+
+    if (target)
+        target->ISNewSwitch(dev, name, states, names, n);
 }
 
 
@@ -137,16 +171,23 @@ void ISNewText(const char *dev,
     if (dev == nullptr)
         return;
 
-    std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+    IDS_CCD *target = nullptr;
 
-    for (auto &cam : idsCCDs)
     {
-        if (strcmp(dev, cam->getDeviceName()) == 0)
+        std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+
+        for (auto &cam : idsCCDs)
         {
-            cam->ISNewText(dev, name, texts, names, n);
-            break;
+            if (strcmp(dev, cam->getDeviceName()) == 0)
+            {
+                target = cam.get();
+                break;
+            }
         }
     }
+
+    if (target)
+        target->ISNewText(dev, name, texts, names, n);
 }
 
 
@@ -159,16 +200,23 @@ void ISNewNumber(const char *dev,
     if (dev == nullptr)
         return;
 
-    std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+    IDS_CCD *target = nullptr;
 
-    for (auto &cam : idsCCDs)
     {
-        if (strcmp(dev, cam->getDeviceName()) == 0)
+        std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+
+        for (auto &cam : idsCCDs)
         {
-            cam->ISNewNumber(dev, name, values, names, n);
-            break;
+            if (strcmp(dev, cam->getDeviceName()) == 0)
+            {
+                target = cam.get();
+                break;
+            }
         }
     }
+
+    if (target)
+        target->ISNewNumber(dev, name, values, names, n);
 }
 
 
@@ -184,16 +232,23 @@ void ISNewBLOB(const char *dev,
     if (dev == nullptr)
         return;
 
-    std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+    IDS_CCD *target = nullptr;
 
-    for (auto &cam : idsCCDs)
     {
-        if (strcmp(dev, cam->getDeviceName()) == 0)
+        std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+
+        for (auto &cam : idsCCDs)
         {
-            cam->ISNewBLOB(dev, name, sizes, blobsizes, blobs, formats, names, n);
-            break;
+            if (strcmp(dev, cam->getDeviceName()) == 0)
+            {
+                target = cam.get();
+                break;
+            }
         }
     }
+
+    if (target)
+        target->ISNewBLOB(dev, name, sizes, blobsizes, blobs, formats, names, n);
 }
 
 
@@ -207,16 +262,23 @@ void ISSnoopDevice(XMLEle *root)
     if (dev == nullptr)
         return;
 
-    std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+    IDS_CCD *target = nullptr;
 
-    for (auto &cam : idsCCDs)
     {
-        if (strcmp(dev, cam->getDeviceName()) == 0)
+        std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+
+        for (auto &cam : idsCCDs)
         {
-            cam->ISSnoopDevice(root);
-            break;
+            if (strcmp(dev, cam->getDeviceName()) == 0)
+            {
+                target = cam.get();
+                break;
+            }
         }
     }
+
+    if (target)
+        target->ISSnoopDevice(root);
 }
 
 IDS_CCD::IDS_CCD()
@@ -350,7 +412,7 @@ bool IDS_CCD::Disconnect()
 
 void IDS_CCD::ISGetProperties(const char *dev)  
 {  
-    LOGF_INFO("=== ISGetProperties() called for device: %s ===", dev ? dev : "NULL");  
+    LOGF_INFO("=== IDS_CCD::ISGetProperties() called for device: %s ===", dev ? dev : "ALL_DEVICES"); 
       
     INDI::CCD::ISGetProperties(dev);  
     LOG_DEBUG("Base CCD properties defined");  
@@ -661,15 +723,20 @@ bool IDS_CCD::initCamera()
     }
 }
 
-const char *IDS_CCD::getDefaultName()  
-{ 
-    std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
- 
-    // If we have real cameras detected, don't create a default instance  
-    if (!idsCCDs.empty())  
-        return "";  // Empty name prevents default instance creation  
-      
-    return "IDS CCD";  // Only return default name when no cameras detected  
+//const char *IDS_CCD::getDefaultName()  
+//{ 
+//    std::lock_guard<std::mutex> idsLock(idsCCDsMutex);
+// 
+//    // If we have real cameras detected, don't create a default instance  
+//    if (!idsCCDs.empty())  
+//        return "";  // Empty name prevents default instance creation  
+//      
+//    return "IDS CCD";  // Only return default name when no cameras detected  
+//}
+
+const char *IDS_CCD::getDefaultName()
+{
+    return "IDS CCD";
 }
 
 std::vector<std::string> IDS_CCD::queryAvailableUserSets()    
@@ -1007,10 +1074,32 @@ bool IDS_CCD::startAcquisition()
 
     try
     {
-        // 1. Start the software stream for one frame.
+        /*
+         * Do not Flush() before every frame.
+         *
+         * Buffers should already be announced and queued by setupParams(),
+         * SetCaptureFormat(), UpdateCCDFrame(), or previous grabImage().
+         *
+         * Flushing here can disturb live-view operation because it discards queued
+         * buffers immediately before the camera is asked to deliver a frame.
+         */
+
+        try
+        {
+            if (dataStream->IsGrabbing())
+            {
+                LOG_WARN("Data stream was still grabbing before new exposure; stopping it first.");
+                dataStream->StopAcquisition(peak::core::AcquisitionStopMode::Default);
+            }
+        }
+        catch (const std::exception &e)
+        {
+            LOGF_WARN("Could not query/stop data stream before acquisition start: %s", e.what());
+        }
+
+        // Start the software stream for exactly one frame.
         dataStream->StartAcquisition(peak::core::AcquisitionStartMode::Default, 1);
 
-        // 2. Start the camera hardware.
         if (!acquisitionStartNode || !acquisitionStartNode->IsAvailable())
         {
             throw std::runtime_error("AcquisitionStart node not available");
@@ -1029,8 +1118,6 @@ bool IDS_CCD::startAcquisition()
     {
         LOGF_ERROR("Error starting acquisition: %s", ex.what());
 
-        // If the software stream started but the camera start failed,
-        // stop and flush the stream so the next exposure starts cleanly.
         if (dataStream)
         {
             try
@@ -1045,11 +1132,11 @@ bool IDS_CCD::startAcquisition()
             {
                 LOGF_WARN("Could not stop data stream after failed acquisition start: %s", e.what());
             }
-            catch (...)
-            {
-                LOG_WARN("Could not stop data stream after failed acquisition start.");
-            }
 
+            /*
+             * Only recover buffers on error.
+             * This is the right place for Flush/RequeueAll, not the normal frame path.
+             */
             try
             {
                 dataStream->Flush(peak::core::DataStreamFlushMode::DiscardAll);
@@ -1059,34 +1146,35 @@ bool IDS_CCD::startAcquisition()
             {
                 LOGF_WARN("Could not flush data stream after failed acquisition start: %s", e.what());
             }
-            catch (...)
-            {
-                LOG_WARN("Could not flush data stream after failed acquisition start.");
-            }
 
-            // Requeue announced buffers after flushing, so the next start has buffers.
             try
             {
+                size_t requeuedCount = 0;
+
                 for (auto &buffer : dataStream->AnnouncedBuffers())
                 {
                     try
                     {
                         dataStream->QueueBuffer(buffer);
+                        ++requeuedCount;
                     }
                     catch (...)
                     {
-                        // Ignore buffers the SDK refuses to requeue.
+                        // Ignore buffers that are already queued or not queueable.
                     }
                 }
+
+                LOGF_DEBUG("Requeued %zu buffer(s) after failed acquisition start.", requeuedCount);
             }
             catch (const std::exception &e)
             {
-                LOGF_WARN("Could not requeue buffers after failed acquisition start: %s", e.what());
+                LOGF_WARN("Could not enumerate/requeue buffers after failed acquisition start: %s", e.what());
             }
         }
 
         m_isAcquiring.store(false);
         InExposure.store(false);
+        PrimaryCCD.setExposureLeft(0.0);
 
         return false;
     }
@@ -1094,36 +1182,55 @@ bool IDS_CCD::startAcquisition()
 
 bool IDS_CCD::stopAcquisition()
 {
-    if (!m_isAcquiring.load())
+    bool streamIsGrabbing = false;
+
+    try
+    {
+        if (dataStream)
+            streamIsGrabbing = dataStream->IsGrabbing();
+    }
+    catch (const std::exception &e)
+    {
+        LOGF_DEBUG("Could not query data stream grabbing state: %s", e.what());
+    }
+
+    if (!m_isAcquiring.load() && !streamIsGrabbing)
     {
         LOG_DEBUG("Acquisition not running; skipping stop.");
+        InExposure.store(false);
+        m_isAcquiring.store(false);
         return true;
     }
 
     try
     {
-        // 1. Tell the hardware device to stop generating frames
         if (acquisitionStopNode && acquisitionStopNode->IsAvailable())
         {
-            acquisitionStopNode->Execute();
-            acquisitionStopNode->WaitUntilDone();
-        }
-        else if (nodeMapRemoteDevice)
-        {
-            auto stopNode =
-                nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("AcquisitionStop");
-
-            if (stopNode && stopNode->IsAvailable())
+            try
             {
-                stopNode->Execute();
-                stopNode->WaitUntilDone();
+                acquisitionStopNode->Execute();
+                acquisitionStopNode->WaitUntilDone();
+            }
+            catch (const std::exception &e)
+            {
+                LOGF_DEBUG("AcquisitionStop command failed or was unnecessary: %s", e.what());
             }
         }
 
-        // 2. Tell the software stream to stop receiving
         if (dataStream)
         {
-            dataStream->StopAcquisition();
+            try
+            {
+                if (dataStream->IsGrabbing())
+                {
+                    dataStream->StopAcquisition(peak::core::AcquisitionStopMode::Default);
+                    LOG_DEBUG("Data stream stopped.");
+                }
+            }
+            catch (const std::exception &e)
+            {
+                LOGF_WARN("DataStream StopAcquisition failed: %s", e.what());
+            }
         }
 
         InExposure.store(false);
@@ -1225,7 +1332,13 @@ bool IDS_CCD::StartExposure(float duration)
 std::string IDS_CCD::determineUserSetForDuration(float duration)  
 {  
     // Get available user sets  
-    std::vector<std::string> availableUserSets = queryAvailableUserSets();  
+    if (!m_userSetsQueried)
+    {
+        m_availableUserSets = queryAvailableUserSets();
+        m_userSetsQueried = true;
+    }
+
+    const std::vector<std::string> &availableUserSets = m_availableUserSets;
       
     if (availableUserSets.empty())  
     {  
@@ -1347,7 +1460,6 @@ void IDS_CCD::getExposure()
         }
         else
         {
-            InExposure.store(false);
             PrimaryCCD.setExposureLeft(0.0);
 
             double exposureRequest = 0.0;
@@ -1548,25 +1660,49 @@ int IDS_CCD::grabImage()
 {
     std::unique_lock<std::mutex> guard(ccdBufferLock);
 
+    std::shared_ptr<peak::core::Buffer> buffer;
+    bool bufferRequeued = false;
+
     try
     {
         if (!dataStream)
         {
             LOG_ERROR("Cannot grab image: data stream is not initialized.");
+            InExposure.store(false);
+            m_isAcquiring.store(false);
+            PrimaryCCD.setExposureLeft(0.0);
             return false;
         }
 
-        // 1. Wait for the buffer from the camera
-        auto buffer = dataStream->WaitForFinishedBuffer(5000);
+        if (!widthNode || !heightNode || !pixelFormatNode)
+        {
+            LOG_ERROR("Cannot grab image: required camera nodes are not initialized.");
+            stopAcquisition();
+            PrimaryCCD.setExposureLeft(0.0);
+            return false;
+        }
+
+        constexpr uint64_t BUFFER_TIMEOUT_MS = 10000;
+
+        LOGF_DEBUG("Waiting for finished buffer, timeout=%llu ms",
+                   static_cast<unsigned long long>(BUFFER_TIMEOUT_MS));
+
+        buffer = dataStream->WaitForFinishedBuffer(BUFFER_TIMEOUT_MS);
+
+        if (!buffer)
+        {
+            LOG_ERROR("WaitForFinishedBuffer returned null buffer.");
+            stopAcquisition();
+            PrimaryCCD.setExposureLeft(0.0);
+            return false;
+        }
+
         peak::ipl::Image image = peak::BufferTo<peak::ipl::Image>(buffer);
 
-        InExposure.store(false);
+        const uint32_t imgWidth  = static_cast<uint32_t>(widthNode->Value());
+        const uint32_t imgHeight = static_cast<uint32_t>(heightNode->Value());
 
-        // 2. Extract dimensions and format from cached nodes
-        uint32_t imgWidth  = static_cast<uint32_t>(widthNode->Value());
-        uint32_t imgHeight = static_cast<uint32_t>(heightNode->Value());
-
-        std::string currentFormat =
+        const std::string currentFormat =
             pixelFormatNode->CurrentEntry()->SymbolicValue();
 
         LOGF_DEBUG("grabImage(): Processing %ux%u in format %s",
@@ -1574,88 +1710,157 @@ int IDS_CCD::grabImage()
                    imgHeight,
                    currentFormat.c_str());
 
-        // 3. Look up format info in the map
         auto it = m_formatMap.find(currentFormat);
 
         if (it == m_formatMap.end())
         {
             LOGF_ERROR("Unsupported pixel format: %s", currentFormat.c_str());
 
-            stopAcquisition();
-
             try
             {
                 dataStream->QueueBuffer(buffer);
+                bufferRequeued = true;
             }
-            catch (...)
+            catch (const std::exception &e)
             {
-                LOG_WARN("Could not requeue buffer after unsupported format.");
+                LOGF_WARN("Could not requeue buffer after unsupported format: %s", e.what());
             }
 
+            stopAcquisition();
+            PrimaryCCD.setExposureLeft(0.0);
             return false;
         }
 
         PixelFormatInfo &fmtInfo = it->second;
 
-        uint8_t *src = static_cast<uint8_t *>(image.Data());
-        uint8_t *dst = PrimaryCCD.getFrameBuffer();
-
-        size_t expectedSize = (fmtInfo.bitsPerPixel / 8) * imgWidth * imgHeight;
-
-        if (!dst || expectedSize == 0)
+        if ((fmtInfo.bitsPerPixel % 8) != 0 && !fmtInfo.expandFunc)
         {
-            LOGF_ERROR("Invalid buffer: dst=%p, expectedSize=%zu", dst, expectedSize);
-
-            stopAcquisition();
+            LOGF_ERROR("Unsafe pixel format mapping for %s: %u bpp without expansion function.",
+                       currentFormat.c_str(),
+                       fmtInfo.bitsPerPixel);
 
             try
             {
                 dataStream->QueueBuffer(buffer);
+                bufferRequeued = true;
             }
-            catch (...)
+            catch (const std::exception &e)
             {
-                LOG_WARN("Could not requeue buffer after invalid destination buffer.");
+                LOGF_WARN("Could not requeue buffer after unsafe format mapping: %s", e.what());
             }
 
+            stopAcquisition();
+            PrimaryCCD.setExposureLeft(0.0);
             return false;
         }
 
-        LOGF_DEBUG("Processing image: %ux%u, %u bpp, buffer size: %zu",
+        uint8_t *src = static_cast<uint8_t *>(image.Data());
+
+        const size_t expectedSize =
+            static_cast<size_t>(fmtInfo.bitsPerPixel / 8) *
+            static_cast<size_t>(imgWidth) *
+            static_cast<size_t>(imgHeight);
+
+        if (expectedSize == 0)
+        {
+            LOGF_ERROR("Invalid expected image size: %zu", expectedSize);
+
+            try
+            {
+                dataStream->QueueBuffer(buffer);
+                bufferRequeued = true;
+            }
+            catch (const std::exception &e)
+            {
+                LOGF_WARN("Could not requeue buffer after invalid expected image size: %s", e.what());
+            }
+
+            stopAcquisition();
+            PrimaryCCD.setExposureLeft(0.0);
+            return false;
+        }
+
+        if (PrimaryCCD.getFrameBuffer() == nullptr)
+        {
+            LOG_WARN("Frame buffer is null in grabImage(). Allocating now.");
+            allocateFrameBuffer();
+        }
+
+        uint8_t *dst = PrimaryCCD.getFrameBuffer();
+
+        if (!src || !dst)
+        {
+            LOGF_ERROR("Invalid image buffers: src=%p dst=%p expectedSize=%zu",
+                       src,
+                       dst,
+                       expectedSize);
+
+            try
+            {
+                dataStream->QueueBuffer(buffer);
+                bufferRequeued = true;
+            }
+            catch (const std::exception &e)
+            {
+                LOGF_WARN("Could not requeue buffer after invalid image buffer: %s", e.what());
+            }
+
+            stopAcquisition();
+            PrimaryCCD.setExposureLeft(0.0);
+            return false;
+        }
+
+        LOGF_DEBUG("Processing image: %ux%u, %u output bpp, buffer size: %zu",
                    imgWidth,
                    imgHeight,
                    fmtInfo.bitsPerPixel,
                    expectedSize);
 
-        // 4. Apply conversion/expansion
+        /*
+         * Copy/expand data into INDI's own frame buffer first.
+         * After this point, the IDS buffer is no longer needed by INDI.
+         */
         if (fmtInfo.expandFunc)
         {
             fmtInfo.expandFunc(src, dst, imgWidth, imgHeight);
         }
         else
         {
-            size_t size = (fmtInfo.bitsPerPixel / 8) * imgWidth * imgHeight;
-            memcpy(dst, src, size);
+            memcpy(dst, src, expectedSize);
         }
 
-        LOGF_DEBUG("Calling ExposureComplete with buffer at %p, size %zu",
-                   dst,
-                   expectedSize);
-
-        // 5. Finalize INDI state
         PrimaryCCD.setBPP(fmtInfo.bitsPerPixel);
 
-        stopAcquisition();
-
-        ExposureComplete(&PrimaryCCD);
-
+        /*
+         * Important for live view:
+         * Return the IDS buffer immediately after copying the image data out.
+         * Do this before stopAcquisition() and before ExposureComplete().
+         */
         try
         {
             dataStream->QueueBuffer(buffer);
+            bufferRequeued = true;
+            LOG_DEBUG("Finished buffer requeued after image copy.");
         }
-        catch (...)
+        catch (const std::exception &e)
         {
-            LOG_WARN("Could not requeue buffer after successful image capture.");
+            LOGF_WARN("Could not requeue finished buffer after image copy: %s", e.what());
         }
+
+        /*
+         * Now stop stream/camera state.
+         */
+        stopAcquisition();
+
+        InExposure.store(false);
+        m_isAcquiring.store(false);
+        PrimaryCCD.setExposureLeft(0.0);
+
+        /*
+         * Notify INDI last. This may trigger client-side follow-up actions,
+         * so the IDS stream/buffer state should already be clean here.
+         */
+        ExposureComplete(&PrimaryCCD);
 
         LOGF_INFO("Image captured and processed: %ux%u at %u bpp",
                   imgWidth,
@@ -1668,6 +1873,24 @@ int IDS_CCD::grabImage()
     {
         LOGF_ERROR("Failed to grab image: %s", e.what());
 
+        /*
+         * If we already received a buffer before the exception, try to return it.
+         */
+        if (buffer && !bufferRequeued && dataStream)
+        {
+            try
+            {
+                dataStream->QueueBuffer(buffer);
+                bufferRequeued = true;
+                LOG_DEBUG("Returned received buffer after grabImage exception.");
+            }
+            catch (const std::exception &queueError)
+            {
+                LOGF_DEBUG("Could not return received buffer after grabImage exception: %s",
+                           queueError.what());
+            }
+        }
+
         try
         {
             stopAcquisition();
@@ -1676,8 +1899,53 @@ int IDS_CCD::grabImage()
         {
         }
 
+        /*
+         * Recover stream/buffer state after timeout or other grab failure.
+         * If WaitForFinishedBuffer() timed out, there may be no received buffer,
+         * so recover by flushing and requeueing announced buffers.
+         */
+        if (dataStream)
+        {
+            try
+            {
+                dataStream->Flush(peak::core::DataStreamFlushMode::DiscardAll);
+                LOG_DEBUG("Data stream flushed after grab failure.");
+            }
+            catch (const std::exception &flushError)
+            {
+                LOGF_DEBUG("Could not flush data stream after grab failure: %s",
+                           flushError.what());
+            }
+
+            try
+            {
+                size_t requeuedCount = 0;
+
+                for (auto &announcedBuffer : dataStream->AnnouncedBuffers())
+                {
+                    try
+                    {
+                        dataStream->QueueBuffer(announcedBuffer);
+                        ++requeuedCount;
+                    }
+                    catch (...)
+                    {
+                        // Ignore buffers the SDK refuses to requeue.
+                    }
+                }
+
+                LOGF_DEBUG("Requeued %zu buffers after grab failure.", requeuedCount);
+            }
+            catch (const std::exception &queueError)
+            {
+                LOGF_DEBUG("Could not requeue buffers after grab failure: %s",
+                           queueError.what());
+            }
+        }
+
         InExposure.store(false);
         m_isAcquiring.store(false);
+        PrimaryCCD.setExposureLeft(0.0);
 
         return false;
     }
@@ -1917,169 +2185,275 @@ bool IDS_CCD::setupBlackLevel()
 }
 
 
-bool IDS_CCD::UpdateCCDFrame(int x, int y, int w, int h)    
-{    
-    LOGF_INFO("UpdateCCDFrame called: x=%d y=%d w=%d h=%d", x, y, w, h);    
-    
+bool IDS_CCD::UpdateCCDFrame(int x, int y, int w, int h)
+{
+    LOGF_INFO("UpdateCCDFrame called: x=%d y=%d w=%d h=%d", x, y, w, h);
+
     if (InExposure.load() || m_isAcquiring.load())
-    {    
-        LOG_ERROR("Cannot change ROI while exposure is in progress.");    
-        return false;    
-    }    
-    
-    // Validate input parameters    
-    if (w <= 0 || h <= 0)    
-    {    
-        LOGF_ERROR("Invalid frame dimensions: w=%d h=%d", w, h);    
-        return false;    
-    }    
-    
-    // Get current binning    
-    uint32_t binX = PrimaryCCD.getBinX();    
-    uint32_t binY = PrimaryCCD.getBinY();    
-    
-    // Round up dimensions to nearest binning multiple to prevent truncation    
-    // Round down offsets to keep the ROI within the requested area    
-    int adj_unbinned_w = ((w + binX - 1) / binX) * binX;    
-    int adj_unbinned_h = ((h + binY - 1) / binY) * binY;    
-    int adj_unbinned_x = (x / binX) * binX;    
-    int adj_unbinned_y = (y / binY) * binY;    
-    
-    // Convert to BINNED coordinates for the hardware    
-    int64_t binned_x = adj_unbinned_x / binX;    
-    int64_t binned_y = adj_unbinned_y / binY;    
-    int64_t binned_w = adj_unbinned_w / binX;    
-    int64_t binned_h = adj_unbinned_h / binY;    
-    
-    // Validate against sensor boundaries (unbinned)    
-    if (x + w > cameraWidth || y + h > cameraHeight)    
-    {    
-        LOGF_ERROR("ROI exceeds sensor boundaries: sensor=%dx%d, requested=(%d,%d)+(%d,%d)", cameraWidth, cameraHeight,    
-                   x, y, w, h);    
-        return false;    
-    }    
-    
-    try    
-    {    
-        // Use cached nodes where possible    
-        auto offsetXNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("OffsetX");    
-        auto offsetYNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("OffsetY");    
-            
-        // Validate cached nodes or find fresh ones    
-        auto widthNode = this->widthNode;    
-        auto heightNode = this->heightNode;    
-            
-        if (!widthNode)    
-            widthNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Width");    
-        if (!heightNode)    
-            heightNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Height");    
-            
-        if (!widthNode || !heightNode || !offsetXNode || !offsetYNode)    
-        {    
-            LOG_ERROR("Required ROI nodes not available");    
-            return false;    
-        }    
-    
-        // Query minimum values and increments    
-        int64_t x_min = offsetXNode->Minimum();    
-        int64_t y_min = offsetYNode->Minimum();    
-        int64_t w_min = widthNode->Minimum();    
-        int64_t h_min = heightNode->Minimum();    
-    
-        int64_t x_inc = offsetXNode->Increment();    
-        int64_t y_inc = offsetYNode->Increment();    
-        int64_t w_inc = widthNode->Increment();    
-        int64_t h_inc = heightNode->Increment();    
-    
-        // Normalize BINNED values    
-        auto norm = [](int64_t val, int64_t min, int64_t inc) { return ((val - min) / inc) * inc + min; };    
-    
-        int64_t adj_w = norm(binned_w, w_min, w_inc);    
-        int64_t adj_h = norm(binned_h, h_min, h_inc);    
-        int64_t adj_x = norm(binned_x, x_min, x_inc);    
-        int64_t adj_y = norm(binned_y, y_min, y_inc);    
-    
-        // Additional validation after normalization    
-        if (adj_w <= 0 || adj_h <= 0)    
-        {    
-            LOGF_ERROR("Normalized dimensions are invalid: w=%lld h=%lld", adj_w, adj_h);    
-            return false;    
-        }    
-    
-        // Set minimal ROI first    
-        offsetXNode->SetValue(x_min);    
-        offsetYNode->SetValue(y_min);    
-        widthNode->SetValue(w_min);    
-        heightNode->SetValue(h_min);    
-    
-        // Set the desired ROI (binned dimensions)    
-        widthNode->SetValue(adj_w);    
-        heightNode->SetValue(adj_h);    
-        offsetXNode->SetValue(adj_x);    
-        offsetYNode->SetValue(adj_y);    
-    
-        LOGF_INFO("Hardware ROI set (binned): x=%lld y=%lld w=%lld h=%lld", adj_x, adj_y, adj_w, adj_h);    
-    
-        // Stop acquisition and reallocate buffers - IMPROVED VERSION  
-        try      
-        {      
-            if (dataStream && dataStream->IsGrabbing())      
-            {      
-                dataStream->StopAcquisition(peak::core::AcquisitionStopMode::Default);      
-            }      
-        }      
-        catch (...)      
-        {      
-            LOG_WARN("Could not stop acquisition during ROI change");      
-        }      
-        
-        // Flush any pending buffers - IMPROVED VERSION    
-        try      
-        {      
-            dataStream->Flush(peak::core::DataStreamFlushMode::DiscardAll);      
-        }      
-        catch (...)      
-        {      
-            LOG_WARN("Could not flush data stream during ROI change");      
-        }    
-    
-        for (auto &oldBuffer : dataStream->AnnouncedBuffers())    
-        {    
-            dataStream->RevokeBuffer(oldBuffer);    
-        }    
-    
-        // Query new payload size    
-        size_t payloadSize = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("PayloadSize")->Value();    
-        LOGF_DEBUG("New PayloadSize for ROI: %zu bytes", payloadSize);    
-    
-        // Validate payload size    
-        if (payloadSize == 0)    
-        {    
-            LOG_ERROR("Payload size is 0 after ROI change - camera configuration error");    
-            return false;    
-        }    
-    
-        // Reallocate buffers    
-        const size_t numBuffers = 3;    
-        for (size_t i = 0; i < numBuffers; ++i)    
-        {    
-            auto buffer = dataStream->AllocAndAnnounceBuffer(payloadSize, nullptr);    
-            dataStream->QueueBuffer(buffer);    
-        }    
-    
-        // Update INDI frame buffer size (binned dimensions)    
-        allocateFrameBuffer();    
-    
-        // Set UNBINNED coords in INDI (multiply back)    
-        PrimaryCCD.setFrame(adj_x * binX, adj_y * binY, adj_w * binX, adj_h * binY);    
-    
-        return true;    
-    }    
-    catch (const std::exception &e)    
-    {    
-        LOGF_ERROR("Failed to set hardware ROI and reallocate buffers: %s", e.what());    
-        return false;    
-    }    
+    {
+        LOG_ERROR("Cannot change ROI while exposure/acquisition is in progress.");
+        return false;
+    }
+
+    if (!nodeMapRemoteDevice)
+    {
+        LOG_ERROR("Cannot change ROI: node map is not initialized.");
+        return false;
+    }
+
+    if (!dataStream)
+    {
+        LOG_ERROR("Cannot change ROI: data stream is not initialized.");
+        return false;
+    }
+
+    if (w <= 0 || h <= 0)
+    {
+        LOGF_ERROR("Invalid frame dimensions: w=%d h=%d", w, h);
+        return false;
+    }
+
+    if (x < 0 || y < 0)
+    {
+        LOGF_ERROR("Invalid frame origin: x=%d y=%d", x, y);
+        return false;
+    }
+
+    if (x + w > cameraWidth || y + h > cameraHeight)
+    {
+        LOGF_ERROR("ROI exceeds sensor boundaries: sensor=%dx%d, requested=(%d,%d)+(%d,%d)",
+                   cameraWidth, cameraHeight, x, y, w, h);
+        return false;
+    }
+
+    const uint32_t binX = PrimaryCCD.getBinX();
+    const uint32_t binY = PrimaryCCD.getBinY();
+
+    if (binX == 0 || binY == 0)
+    {
+        LOGF_ERROR("Invalid current binning: %ux%u", binX, binY);
+        return false;
+    }
+
+    /*
+     * Fast no-op path.
+     * This is important because many INDI clients resend the current full-frame ROI
+     * when starting live view. Do not touch IDS buffers if nothing really changes.
+     */
+    if (PrimaryCCD.getSubX() == x &&
+        PrimaryCCD.getSubY() == y &&
+        PrimaryCCD.getSubW() == w &&
+        PrimaryCCD.getSubH() == h)
+    {
+        LOGF_DEBUG("ROI already set to x=%d y=%d w=%d h=%d; skipping hardware reconfiguration.",
+                   x, y, w, h);
+
+        // Even if ROI is unchanged, make sure the INDI frame buffer exists.
+        // This is important during startup/live-view setup where the client may resend
+        // the current ROI before the framebuffer has been allocated.
+        if (PrimaryCCD.getFrameBuffer() == nullptr)
+        {
+            LOG_WARN("ROI unchanged, but frame buffer is null. Allocating frame buffer now.");
+            allocateFrameBuffer();
+
+            if (PrimaryCCD.getFrameBuffer() == nullptr)
+            {
+                LOG_ERROR("Failed to allocate frame buffer for unchanged ROI.");
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    try
+    {
+        auto offsetXNode =
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("OffsetX");
+
+        auto offsetYNode =
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("OffsetY");
+
+        if (!widthNode)
+            widthNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Width");
+
+        if (!heightNode)
+            heightNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Height");
+
+        if (!widthNode || !heightNode || !offsetXNode || !offsetYNode)
+        {
+            LOG_ERROR("Required ROI nodes are not available.");
+            return false;
+        }
+
+        const int adj_unbinned_w = ((w + binX - 1) / binX) * binX;
+        const int adj_unbinned_h = ((h + binY - 1) / binY) * binY;
+        const int adj_unbinned_x = (x / binX) * binX;
+        const int adj_unbinned_y = (y / binY) * binY;
+
+        const int64_t binned_x = adj_unbinned_x / binX;
+        const int64_t binned_y = adj_unbinned_y / binY;
+        const int64_t binned_w = adj_unbinned_w / binX;
+        const int64_t binned_h = adj_unbinned_h / binY;
+
+        const int64_t x_min = offsetXNode->Minimum();
+        const int64_t y_min = offsetYNode->Minimum();
+        const int64_t w_min = widthNode->Minimum();
+        const int64_t h_min = heightNode->Minimum();
+
+        const int64_t x_inc = std::max<int64_t>(1, offsetXNode->Increment());
+        const int64_t y_inc = std::max<int64_t>(1, offsetYNode->Increment());
+        const int64_t w_inc = std::max<int64_t>(1, widthNode->Increment());
+        const int64_t h_inc = std::max<int64_t>(1, heightNode->Increment());
+
+        auto norm = [](int64_t val, int64_t min, int64_t inc)
+        {
+            if (val < min)
+                return min;
+
+            return ((val - min) / inc) * inc + min;
+        };
+
+        const int64_t adj_x = norm(binned_x, x_min, x_inc);
+        const int64_t adj_y = norm(binned_y, y_min, y_inc);
+        const int64_t adj_w = norm(binned_w, w_min, w_inc);
+        const int64_t adj_h = norm(binned_h, h_min, h_inc);
+
+        if (adj_w <= 0 || adj_h <= 0)
+        {
+            LOGF_ERROR("Normalized ROI dimensions are invalid: w=%lld h=%lld",
+                       static_cast<long long>(adj_w),
+                       static_cast<long long>(adj_h));
+            return false;
+        }
+
+        /*
+         * Second no-op path after normalization.
+         * This catches cases where the requested ROI differs only by alignment.
+         */
+        const int newSubX = static_cast<int>(adj_x * binX);
+        const int newSubY = static_cast<int>(adj_y * binY);
+        const int newSubW = static_cast<int>(adj_w * binX);
+        const int newSubH = static_cast<int>(adj_h * binY);
+
+        if (PrimaryCCD.getSubX() == newSubX &&
+            PrimaryCCD.getSubY() == newSubY &&
+            PrimaryCCD.getSubW() == newSubW &&
+            PrimaryCCD.getSubH() == newSubH)
+        {
+            LOGF_DEBUG("Normalized ROI already active: x=%d y=%d w=%d h=%d; skipping hardware reconfiguration.",
+                       newSubX, newSubY, newSubW, newSubH);
+            return true;
+        }
+
+        /*
+         * Stop and clear the stream BEFORE changing ROI/payload-affecting nodes.
+         */
+        try
+        {
+            if (dataStream->IsGrabbing())
+            {
+                LOG_WARN("Data stream is grabbing during ROI change; stopping it first.");
+                dataStream->StopAcquisition(peak::core::AcquisitionStopMode::Default);
+            }
+        }
+        catch (const std::exception &e)
+        {
+            LOGF_ERROR("Could not stop data stream during ROI change: %s", e.what());
+            return false;
+        }
+
+        try
+        {
+            dataStream->Flush(peak::core::DataStreamFlushMode::DiscardAll);
+        }
+        catch (const std::exception &e)
+        {
+            LOGF_ERROR("Could not flush data stream during ROI change: %s", e.what());
+            return false;
+        }
+
+        /*
+         * Revoke old buffers only after a successful flush.
+         */
+        std::vector<std::shared_ptr<peak::core::Buffer>> oldBuffers;
+
+        try
+        {
+            for (auto &oldBuffer : dataStream->AnnouncedBuffers())
+            {
+                oldBuffers.push_back(oldBuffer);
+            }
+
+            for (auto &oldBuffer : oldBuffers)
+            {
+                dataStream->RevokeBuffer(oldBuffer);
+            }
+        }
+        catch (const std::exception &e)
+        {
+            LOGF_ERROR("Could not revoke old buffers during ROI change: %s", e.what());
+            return false;
+        }
+
+        /*
+         * Now change ROI nodes.
+         * Many GenICam cameras require offsets to be reduced before width/height changes.
+         */
+        offsetXNode->SetValue(x_min);
+        offsetYNode->SetValue(y_min);
+
+        widthNode->SetValue(w_min);
+        heightNode->SetValue(h_min);
+
+        widthNode->SetValue(adj_w);
+        heightNode->SetValue(adj_h);
+
+        offsetXNode->SetValue(adj_x);
+        offsetYNode->SetValue(adj_y);
+
+        LOGF_INFO("Hardware ROI set (binned): x=%lld y=%lld w=%lld h=%lld",
+                  static_cast<long long>(adj_x),
+                  static_cast<long long>(adj_y),
+                  static_cast<long long>(adj_w),
+                  static_cast<long long>(adj_h));
+
+        payloadSizeNode =
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("PayloadSize");
+
+        const size_t payloadSize = static_cast<size_t>(payloadSizeNode->Value());
+
+        if (payloadSize == 0)
+        {
+            LOG_ERROR("Payload size is 0 after ROI change.");
+            return false;
+        }
+
+        LOGF_DEBUG("New PayloadSize for ROI: %zu bytes", payloadSize);
+
+        const size_t numBuffers =
+            std::max<size_t>(3, static_cast<size_t>(dataStream->NumBuffersAnnouncedMinRequired()));
+
+        for (size_t i = 0; i < numBuffers; ++i)
+        {
+            auto buffer = dataStream->AllocAndAnnounceBuffer(payloadSize, nullptr);
+            dataStream->QueueBuffer(buffer);
+        }
+
+        PrimaryCCD.setFrame(newSubX, newSubY, newSubW, newSubH);
+
+        allocateFrameBuffer();
+
+        LOGF_INFO("ROI update complete: x=%d y=%d w=%d h=%d, payload=%zu, buffers=%zu",
+                  newSubX, newSubY, newSubW, newSubH, payloadSize, numBuffers);
+
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        LOGF_ERROR("Failed to set hardware ROI and reallocate buffers: %s", e.what());
+        return false;
+    }
 }
 
 bool IDS_CCD::UpdateCCDBin(int binX, int binY)      
@@ -2097,6 +2471,18 @@ bool IDS_CCD::UpdateCCDBin(int binX, int binY)
         LOG_ERROR("Cannot change binning while exposure is in progress.");      
         return false;      
     }      
+      
+    if (PrimaryCCD.getBinX() == static_cast<uint32_t>(binX) && PrimaryCCD.getBinY() == static_cast<uint32_t>(binY))
+    {
+        LOGF_DEBUG("Binning already set to %dx%d; skipping hardware reconfiguration.", binX, binY);
+        return true;
+    }  
+      
+    if (!nodeMapRemoteDevice)
+    {
+        LOG_ERROR("Cannot change binning: node map is not initialized.");
+        return false;
+    }  
       
     auto binHNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("BinningHorizontal");      
     auto binVNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("BinningVertical");      
