@@ -187,8 +187,8 @@ private:
     std::shared_ptr<peak::core::nodes::FloatNode> tempNode;  
     std::shared_ptr<peak::core::nodes::EnumerationNode> tempSelectorNode;
     std::shared_ptr<peak::core::nodes::FloatNode> gainNode;  
+    // INDI Offset is backed by the IDS/GenICam BlackLevel node.
     std::shared_ptr<peak::core::nodes::FloatNode> blackLevelNode;  
-    std::shared_ptr<peak::core::nodes::FloatNode> offsetNode;  
     std::shared_ptr<peak::core::nodes::FloatNode> pixelWidthNode, pixelHeightNode;  
     
     // EXPOSURE STATE TRACKING    
@@ -244,7 +244,6 @@ private:
     void debugCurrentState();    
     int timerID = -1;  
       
-    // BLACK LEVEL CONTROL    
+    // BLACK LEVEL / OFFSET CONTROL
     void updateBlackLevelRange();    
-    void resetBlackLevelToDefault();    
 };
