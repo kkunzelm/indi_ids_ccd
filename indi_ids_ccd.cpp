@@ -681,9 +681,16 @@ bool IDS_CCD::initCamera()
         // 6. Set acquisition mode
         try
         {
-            nodeMapRemoteDevice
-                ->FindNode<peak::core::nodes::EnumerationNode>("AcquisitionMode")
-                ->SetCurrentEntry("SingleFrame");
+            if (!acquisitionModeNode)
+            {
+                acquisitionModeNode =
+                    nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("AcquisitionMode");
+            }
+
+            if (acquisitionModeNode && acquisitionModeNode->IsWriteable())
+            {
+                acquisitionModeNode->SetCurrentEntry("SingleFrame");
+            }
         }
         catch (const std::exception &e)
         {
@@ -1926,7 +1933,11 @@ bool IDS_CCD::selectGainChannel()
     try  
     {  
         // Check if GainSelector exists  
-        auto gainSelectorNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("GainSelector");  
+        if (!gainSelectorNode)
+        {
+            gainSelectorNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("GainSelector");
+        }
+
         if (!gainSelectorNode)  
         {  
             LOG_INFO("Camera does not support GainSelector");  
@@ -2007,10 +2018,17 @@ bool IDS_CCD::ISNewNumber(const char *dev, const char *name, double values[], ch
 
             try
             {
-                if (gainNode)
-                    gainNode->SetValue(GainNP[0].value);
-                else
-                    nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("Gain")->SetValue(GainNP[0].value);
+                if (!gainNode)
+                {
+                    gainNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("Gain");
+                }
+
+                if (!gainNode || !gainNode->IsWriteable())
+                {
+                    throw std::runtime_error("Gain node is not available or not writable");
+                }
+
+                gainNode->SetValue(GainNP[0].value);
 
                 GainNP.setState(IPS_OK);
                 LOGF_INFO("Gain set to %.2f", GainNP[0].value);
@@ -2282,17 +2300,25 @@ bool IDS_CCD::UpdateCCDFrame(int x, int y, int w, int h)
 
     try
     {
-        auto offsetXNode =
-            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("OffsetX");
+        if (!offsetXNode)
+        {
+            offsetXNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("OffsetX");
+        }
 
-        auto offsetYNode =
-            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("OffsetY");
+        if (!offsetYNode)
+        {
+            offsetYNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("OffsetY");
+        }
 
         if (!widthNode)
+        {
             widthNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Width");
+        }
 
         if (!heightNode)
+        {
             heightNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Height");
+        }
 
         if (!widthNode || !heightNode || !offsetXNode || !offsetYNode)
         {
@@ -2498,17 +2524,24 @@ bool IDS_CCD::UpdateCCDBin(int binX, int binY)
         return false;
     }  
       
-    auto binHNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("BinningHorizontal");      
-    auto binVNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("BinningVertical");      
-      
-    if (!binHNode || !binVNode)      
+    if (!binningHorizontalNode)
+    {
+        binningHorizontalNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("BinningHorizontal");
+    }
+
+    if (!binningVerticalNode)
+    {
+        binningVerticalNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("BinningVertical");
+    }
+
+    if (!binningHorizontalNode || !binningVerticalNode)      
     {      
         LOG_ERROR("Binning nodes not available");      
         return false;      
     }      
       
-    int64_t maxBinH = binHNode->Maximum();      
-    int64_t maxBinV = binVNode->Maximum();      
+    int64_t maxBinH = binningHorizontalNode->Maximum();      
+    int64_t maxBinV = binningVerticalNode->Maximum();      
       
     if (binX < 1 || binX > maxBinH || binY < 1 || binY > maxBinV)      
     {      
@@ -2526,19 +2559,22 @@ bool IDS_CCD::UpdateCCDBin(int binX, int binY)
     try      
     {      
         // Check if BinningSelector exists and is usable      
-        auto binSelectorNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("BinningSelector");      
-              
-        if (binSelectorNode && binSelectorNode->IsWriteable())      
+        if (!binningSelectorNode)
+        {
+            binningSelectorNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("BinningSelector");
+        }
+
+        if (binningSelectorNode && binningSelectorNode->IsWriteable())      
         {      
             // Try to find Region0 or any available entry      
-            auto entries = binSelectorNode->Entries();      
+            auto entries = binningSelectorNode->Entries();      
             for (const auto& entry : entries)      
             {      
                 std::string entryName;    
                 try      
                 {      
                     entryName = entry->SymbolicValue();      
-                    binSelectorNode->SetCurrentEntry(entryName);      
+                    binningSelectorNode->SetCurrentEntry(entryName);      
                     LOGF_DEBUG("Using binning selector entry: %s", entryName.c_str());      
                     break;      
                 }      
@@ -2551,19 +2587,28 @@ bool IDS_CCD::UpdateCCDBin(int binX, int binY)
         }      
       
         // Set binning values      
-        binHNode->SetValue(binX);      
-        binVNode->SetValue(binY);      
+        binningHorizontalNode->SetValue(binX);      
+        binningVerticalNode->SetValue(binY);      
       
         // Set binning modes if available - CHECK AVAILABLE MODES FIRST  
-        auto binHModeNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("BinningHorizontalMode");      
-        auto binVModeNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("BinningVerticalMode");      
+        if (!binningHorizontalModeNode)
+        {
+            binningHorizontalModeNode =
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("BinningHorizontalMode");
+        }
+
+        if (!binningVerticalModeNode)
+        {
+            binningVerticalModeNode =
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("BinningVerticalMode");
+        }
       
         std::string availableMode = "";  
           
-        if (binHModeNode && binHModeNode->IsWriteable())      
+        if (binningHorizontalModeNode && binningHorizontalModeNode->IsWriteable())      
         {      
             // Find available modes  
-            auto entries = binHModeNode->Entries();  
+            auto entries = binningHorizontalModeNode->Entries();  
             for (const auto& entry : entries)  
             {  
                 if (entry->IsAvailable())  
@@ -2574,7 +2619,7 @@ bool IDS_CCD::UpdateCCDBin(int binX, int binY)
                     {  
                         try  
                         {  
-                            binHModeNode->SetCurrentEntry(modeName);  
+                            binningHorizontalModeNode->SetCurrentEntry(modeName);  
                             availableMode = modeName;  
                             LOGF_INFO("Using horizontal binning mode: %s", modeName.c_str());  
                             break;  
@@ -2598,7 +2643,7 @@ bool IDS_CCD::UpdateCCDBin(int binX, int binY)
                         std::string modeName = entry->SymbolicValue();  
                         try  
                         {  
-                            binHModeNode->SetCurrentEntry(modeName);  
+                            binningHorizontalModeNode->SetCurrentEntry(modeName);  
                             availableMode = modeName;  
                             LOGF_INFO("Using available horizontal binning mode: %s", modeName.c_str());  
                             break;  
@@ -2613,13 +2658,13 @@ bool IDS_CCD::UpdateCCDBin(int binX, int binY)
             }  
         }      
           
-        if (binVModeNode && binVModeNode->IsWriteable())      
+        if (binningVerticalModeNode && binningVerticalModeNode->IsWriteable())      
         {      
             if (!availableMode.empty())  
             {  
                 try  
                 {  
-                    binVModeNode->SetCurrentEntry(availableMode);  
+                    binningVerticalModeNode->SetCurrentEntry(availableMode);  
                     LOGF_INFO("Using vertical binning mode: %s", availableMode.c_str());  
                 }  
                 catch (const std::exception &e)  
@@ -2676,17 +2721,24 @@ bool IDS_CCD::switchUserSet(const std::string &userSet)
     {      
         LOGF_INFO("Switching from %s to %s UserSet", currentUserSet.c_str(), userSet.c_str());      
       
-        auto selector = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("UserSetSelector");      
-        auto loader   = nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("UserSetLoad");      
-      
-        if (!selector || !loader)      
+        if (!userSetNode)
+        {
+            userSetNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("UserSetSelector");
+        }
+
+        if (!userSetLoadNode)
+        {
+            userSetLoadNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("UserSetLoad");
+        }
+
+        if (!userSetNode || !userSetLoadNode)      
         {      
             LOG_ERROR("UserSetSelector or UserSetLoad not available");      
             return false;      
         }      
       
         // Additional check: ensure selector is Writeable    
-        if (!selector->IsWriteable())      
+        if (!userSetNode->IsWriteable())
         {      
             LOG_ERROR("UserSetSelector is not Writeable");      
             return false;      
@@ -2726,7 +2778,7 @@ bool IDS_CCD::switchUserSet(const std::string &userSet)
         // Switch userset with additional error handling      
         try      
         {      
-            selector->SetCurrentEntry(userSet);      
+            userSetNode->SetCurrentEntry(userSet);      
         }      
         catch (const peak::core::Exception &e)      
         {      
@@ -2734,10 +2786,10 @@ bool IDS_CCD::switchUserSet(const std::string &userSet)
             return false;      
         }      
       
-        loader->Execute();      
+        userSetLoadNode->Execute();      
       
         // Wait until the UserSetLoad command has finished    
-        loader->WaitUntilDone();      
+        userSetLoadNode->WaitUntilDone();      
       
         // Restore the previous pixel format instead of forcing Mono8      
         try      
@@ -3267,7 +3319,11 @@ void IDS_CCD::allocateFrameBuffer()
     // Get current format and determine if it's Bayer  
     std::string currentFormat = "Mono8"; // default  
       
-    auto pixelFormatNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");  
+    if (!pixelFormatNode)
+    {
+        pixelFormatNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");
+    }
+
     if (pixelFormatNode)  
     {  
         currentFormat = pixelFormatNode->CurrentEntry()->SymbolicValue();  
@@ -3410,8 +3466,6 @@ void IDS_CCD::expand12bitPackedTo16bit(const uint8_t *src, uint8_t *dst, uint32_
 void IDS_CCD::setupTemperatureSensor()
 {
     HasTemperature = false;
-    tempNode = nullptr;
-    tempSelectorNode = nullptr;
 
     if (!nodeMapRemoteDevice)
     {
@@ -3421,16 +3475,22 @@ void IDS_CCD::setupTemperatureSensor()
 
     try
     {
-        tempSelectorNode =
-            nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("DeviceTemperatureSelector");
+        if (!tempSelectorNode)
+        {
+            tempSelectorNode =
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("DeviceTemperatureSelector");
+        }
 
         if (tempSelectorNode && tempSelectorNode->IsAvailable() && tempSelectorNode->IsWriteable())
         {
             tempSelectorNode->SetCurrentEntry("Mainboard");
         }
 
-        tempNode =
-            nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("DeviceTemperature");
+        if (!tempNode)
+        {
+            tempNode =
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("DeviceTemperature");
+        }
 
         HasTemperature =
             tempNode &&
@@ -3754,8 +3814,15 @@ bool IDS_CCD::setupParams()
         updateTemperatureProperty();
 
         // Query sensor dimensions
-        widthNode  = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Width");
-        heightNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Height");
+        if (!widthNode)
+        {
+            widthNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Width");
+        }
+
+        if (!heightNode)
+        {
+            heightNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Height");
+        }
 
         if (widthNode && heightNode)
         {
@@ -3765,11 +3832,17 @@ bool IDS_CCD::setupParams()
         }
 
         // Query pixel size directly from camera in micrometers
-        pixelWidthNode =
-            nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("SensorPixelWidth");
+        if (!pixelWidthNode)
+        {
+            pixelWidthNode =
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("SensorPixelWidth");
+        }
 
-        pixelHeightNode =
-            nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("SensorPixelHeight");
+        if (!pixelHeightNode)
+        {
+            pixelHeightNode =
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("SensorPixelHeight");
+        }
 
         if (pixelWidthNode && pixelHeightNode)
         {
