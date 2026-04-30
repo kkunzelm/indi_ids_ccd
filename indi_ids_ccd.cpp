@@ -631,13 +631,13 @@ bool IDS_CCD::initCamera()
 
         // 4. Cache critical node pointers
         pixelFormatNode =
-            nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");
+            getNode(pixelFormatNode, "PixelFormat");
 
         widthNode =
-            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Width");
+            getNode(widthNode, "Width");
 
         heightNode =
-            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Height");
+            getNode(heightNode, "Height");
 
         try
         {
@@ -658,15 +658,15 @@ bool IDS_CCD::initCamera()
         }
 
         userSetNode =
-            nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("UserSetSelector");
+            getNode(userSetNode, "UserSetSelector");
 
         try
         {
             acquisitionStartNode =
-                nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("AcquisitionStart");
+                getNode(acquisitionStartNode, "AcquisitionStart");
 
             acquisitionStopNode =
-                nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("AcquisitionStop");
+                getNode(acquisitionStopNode, "AcquisitionStop");
         }
         catch (const std::exception &e)
         {
@@ -679,11 +679,7 @@ bool IDS_CCD::initCamera()
         // 6. Set acquisition mode
         try
         {
-            if (!acquisitionModeNode)
-            {
-                acquisitionModeNode =
-                    nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("AcquisitionMode");
-            }
+            acquisitionModeNode = getNode(acquisitionModeNode, "AcquisitionMode");
 
             if (acquisitionModeNode && acquisitionModeNode->IsWriteable())
             {
@@ -699,7 +695,7 @@ bool IDS_CCD::initCamera()
         dataStream = device->DataStreams().at(0)->OpenDataStream();
 
         payloadSizeNode =
-            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("PayloadSize");
+            getNode(payloadSizeNode, "PayloadSize");
 
         const auto payloadSize = payloadSizeNode->Value();
 
@@ -750,7 +746,7 @@ std::vector<std::string> IDS_CCD::queryAvailableUserSets()
         
     try    
     {    
-        auto selector = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("UserSetSelector");    
+        auto selector = getNode(userSetNode, "UserSetSelector");    
         if (!selector)    
         {    
             LOG_ERROR("UserSetSelector not available");    
@@ -806,8 +802,7 @@ void IDS_CCD::queryCameraCapabilities()
     // Check for gain control
     try
     {
-        if (!gainNode)
-            gainNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("Gain");
+        gainNode = getNode(gainNode, "Gain");
 
         if (gainNode && gainNode->IsReadable())
         {
@@ -861,11 +856,7 @@ void IDS_CCD::queryCameraCapabilities()
     // Check for color / Bayer support
     try
     {
-        if (!pixelFormatNode)
-        {
-            pixelFormatNode =
-                nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");
-        }
+        pixelFormatNode = getNode(pixelFormatNode, "PixelFormat");
 
         auto entries = pixelFormatNode->Entries();
 
@@ -909,7 +900,7 @@ void IDS_CCD::queryCameraCapabilities()
     try
     {
         auto binningNode =
-            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("BinningHorizontal");
+            getNode(binningHorizontalNode, "BinningHorizontal");
 
         if (binningNode && binningNode->IsWriteable())
         {
@@ -939,11 +930,9 @@ void IDS_CCD::queryCameraCapabilities()
     // be known yet. setupParams() will call SetCCDParams() once all values are valid.
     try
     {
-        if (!widthNode)
-            widthNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Width");
+        widthNode = getNode(widthNode, "Width");
 
-        if (!heightNode)
-            heightNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Height");
+        heightNode = getNode(heightNode, "Height");
 
         if (widthNode && heightNode)
         {
@@ -1905,10 +1894,7 @@ bool IDS_CCD::selectGainChannel()
     try  
     {  
         // Check if GainSelector exists  
-        if (!gainSelectorNode)
-        {
-            gainSelectorNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("GainSelector");
-        }
+        gainSelectorNode = getNode(gainSelectorNode, "GainSelector");
 
         if (!gainSelectorNode)  
         {  
@@ -1990,10 +1976,7 @@ bool IDS_CCD::ISNewNumber(const char *dev, const char *name, double values[], ch
 
             try
             {
-                if (!gainNode)
-                {
-                    gainNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("Gain");
-                }
+                gainNode = getNode(gainNode, "Gain");
 
                 if (!gainNode || !gainNode->IsWriteable())
                 {
@@ -2031,10 +2014,7 @@ bool IDS_CCD::ISNewNumber(const char *dev, const char *name, double values[], ch
 
             try
             {
-                if (!blackLevelNode)
-                {
-                    blackLevelNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("BlackLevel");
-                }
+                blackLevelNode = getNode(blackLevelNode, "BlackLevel");
 
                 if (!blackLevelNode ||
                     blackLevelNode->AccessStatus() != peak::core::nodes::NodeAccessStatus::ReadWrite)
@@ -2128,10 +2108,7 @@ bool IDS_CCD::setupBlackLevel()
     {
         // INDI exposes this control as Offset. IDS/GenICam exposes the same
         // camera function as BlackLevel. Keep exactly one cached node for it.
-        if (!blackLevelNode)
-        {
-            blackLevelNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("BlackLevel");
-        }
+        blackLevelNode = getNode(blackLevelNode, "BlackLevel");
 
         if (!blackLevelNode || !blackLevelNode->IsReadable())
         {
@@ -2272,25 +2249,13 @@ bool IDS_CCD::UpdateCCDFrame(int x, int y, int w, int h)
 
     try
     {
-        if (!offsetXNode)
-        {
-            offsetXNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("OffsetX");
-        }
+        offsetXNode = getNode(offsetXNode, "OffsetX");
 
-        if (!offsetYNode)
-        {
-            offsetYNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("OffsetY");
-        }
+        offsetYNode = getNode(offsetYNode, "OffsetY");
 
-        if (!widthNode)
-        {
-            widthNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Width");
-        }
+        widthNode = getNode(widthNode, "Width");
 
-        if (!heightNode)
-        {
-            heightNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Height");
-        }
+        heightNode = getNode(heightNode, "Height");
 
         if (!widthNode || !heightNode || !offsetXNode || !offsetYNode)
         {
@@ -2431,7 +2396,7 @@ bool IDS_CCD::UpdateCCDFrame(int x, int y, int w, int h)
                   static_cast<long long>(adj_h));
 
         payloadSizeNode =
-            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("PayloadSize");
+            getNode(payloadSizeNode, "PayloadSize");
 
         const size_t payloadSize = static_cast<size_t>(payloadSizeNode->Value());
 
@@ -2496,15 +2461,9 @@ bool IDS_CCD::UpdateCCDBin(int binX, int binY)
         return false;
     }  
       
-    if (!binningHorizontalNode)
-    {
-        binningHorizontalNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("BinningHorizontal");
-    }
+    binningHorizontalNode = getNode(binningHorizontalNode, "BinningHorizontal");
 
-    if (!binningVerticalNode)
-    {
-        binningVerticalNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("BinningVertical");
-    }
+    binningVerticalNode = getNode(binningVerticalNode, "BinningVertical");
 
     if (!binningHorizontalNode || !binningVerticalNode)      
     {      
@@ -2531,10 +2490,7 @@ bool IDS_CCD::UpdateCCDBin(int binX, int binY)
     try      
     {      
         // Check if BinningSelector exists and is usable      
-        if (!binningSelectorNode)
-        {
-            binningSelectorNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("BinningSelector");
-        }
+        binningSelectorNode = getNode(binningSelectorNode, "BinningSelector");
 
         if (binningSelectorNode && binningSelectorNode->IsWriteable())      
         {      
@@ -2563,17 +2519,9 @@ bool IDS_CCD::UpdateCCDBin(int binX, int binY)
         binningVerticalNode->SetValue(binY);      
       
         // Set binning modes if available - CHECK AVAILABLE MODES FIRST  
-        if (!binningHorizontalModeNode)
-        {
-            binningHorizontalModeNode =
-                nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("BinningHorizontalMode");
-        }
+        binningHorizontalModeNode = getNode(binningHorizontalModeNode, "BinningHorizontalMode");
 
-        if (!binningVerticalModeNode)
-        {
-            binningVerticalModeNode =
-                nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("BinningVerticalMode");
-        }
+        binningVerticalModeNode = getNode(binningVerticalModeNode, "BinningVerticalMode");
       
         std::string availableMode = "";  
           
@@ -2693,15 +2641,9 @@ bool IDS_CCD::switchUserSet(const std::string &userSet)
     {      
         LOGF_INFO("Switching from %s to %s UserSet", currentUserSet.c_str(), userSet.c_str());      
       
-        if (!userSetNode)
-        {
-            userSetNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("UserSetSelector");
-        }
+        userSetNode = getNode(userSetNode, "UserSetSelector");
 
-        if (!userSetLoadNode)
-        {
-            userSetLoadNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("UserSetLoad");
-        }
+        userSetLoadNode = getNode(userSetLoadNode, "UserSetLoad");
 
         if (!userSetNode || !userSetLoadNode)      
         {      
@@ -2726,11 +2668,7 @@ bool IDS_CCD::switchUserSet(const std::string &userSet)
 
         try
         {
-            if (!pixelFormatNode)
-            {
-                pixelFormatNode =
-                    nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");
-            }
+            pixelFormatNode = getNode(pixelFormatNode, "PixelFormat");
 
             if (!pixelFormatNode)
             {
@@ -2860,7 +2798,7 @@ void IDS_CCD::queryPixelFormats()
         {
             LOG_INFO("Querying pixel format node...");
             pixelFormatNode =
-                nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");
+                getNode(pixelFormatNode, "PixelFormat");
         }
         else
         {
@@ -3212,7 +3150,7 @@ bool IDS_CCD::SetCaptureFormat(uint8_t index)
 
         // Reallocate buffers for the new payload size.
         payloadSizeNode =
-            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("PayloadSize");
+            getNode(payloadSizeNode, "PayloadSize");
 
         const size_t payloadSize = static_cast<size_t>(payloadSizeNode->Value());
 
@@ -3277,8 +3215,7 @@ void IDS_CCD::allocateFrameBuffer()
     }      
           
     // Fetch the hardware's expected payload size  
-    if (!payloadSizeNode)  
-        payloadSizeNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("PayloadSize");  
+    payloadSizeNode = getNode(payloadSizeNode, "PayloadSize");  
   
     if (!payloadSizeNode)    
     {      
@@ -3291,10 +3228,7 @@ void IDS_CCD::allocateFrameBuffer()
     // Get current format and determine if it's Bayer  
     std::string currentFormat = "Mono8"; // default  
       
-    if (!pixelFormatNode)
-    {
-        pixelFormatNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");
-    }
+    pixelFormatNode = getNode(pixelFormatNode, "PixelFormat");
 
     if (pixelFormatNode)  
     {  
@@ -3447,11 +3381,7 @@ void IDS_CCD::setupTemperatureSensor()
 
     try
     {
-        if (!tempSelectorNode)
-        {
-            tempSelectorNode =
-                nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("DeviceTemperatureSelector");
-        }
+        tempSelectorNode = getNode(tempSelectorNode, "DeviceTemperatureSelector");
 
         // Select a stable temperature source if the camera exposes a selector.
         // This is monitoring-only; no cooler or setpoint control is implied.
@@ -3468,11 +3398,7 @@ void IDS_CCD::setupTemperatureSensor()
             }
         }
 
-        if (!tempNode)
-        {
-            tempNode =
-                nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("DeviceTemperature");
-        }
+        tempNode = getNode(tempNode, "DeviceTemperature");
 
         HasTemperature =
             tempNode &&
@@ -3552,10 +3478,7 @@ void IDS_CCD::updateBlackLevelRange()
 
     try
     {
-        if (!blackLevelNode)
-        {
-            blackLevelNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("BlackLevel");
-        }
+        blackLevelNode = getNode(blackLevelNode, "BlackLevel");
 
         if (!blackLevelNode || !blackLevelNode->IsReadable())
         {
@@ -3735,7 +3658,7 @@ void IDS_CCD::debugCurrentState()
             try
             {
                 auto userSetSelector =
-                    nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("UserSetSelector");
+                    getNode(userSetNode, "UserSetSelector");
 
                 if (userSetSelector && userSetSelector->IsAvailable())
                 {
@@ -3800,15 +3723,9 @@ bool IDS_CCD::setupParams()
         updateTemperatureProperty();
 
         // Query sensor dimensions
-        if (!widthNode)
-        {
-            widthNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Width");
-        }
+        widthNode = getNode(widthNode, "Width");
 
-        if (!heightNode)
-        {
-            heightNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Height");
-        }
+        heightNode = getNode(heightNode, "Height");
 
         if (widthNode && heightNode)
         {
@@ -3818,17 +3735,9 @@ bool IDS_CCD::setupParams()
         }
 
         // Query pixel size directly from camera in micrometers
-        if (!pixelWidthNode)
-        {
-            pixelWidthNode =
-                nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("SensorPixelWidth");
-        }
+        pixelWidthNode = getNode(pixelWidthNode, "SensorPixelWidth");
 
-        if (!pixelHeightNode)
-        {
-            pixelHeightNode =
-                nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("SensorPixelHeight");
-        }
+        pixelHeightNode = getNode(pixelHeightNode, "SensorPixelHeight");
 
         if (pixelWidthNode && pixelHeightNode)
         {
@@ -4103,7 +4012,7 @@ bool IDS_CCD::setupParams()
             try
             {
                 payloadSizeNode =
-                    nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("PayloadSize");
+                    getNode(payloadSizeNode, "PayloadSize");
 
                 size_t payloadSize = static_cast<size_t>(payloadSizeNode->Value());
 
