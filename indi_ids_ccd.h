@@ -180,16 +180,24 @@ private:
   
     std::shared_ptr<peak::core::nodes::EnumerationNode> pixelFormatNode;  
     std::shared_ptr<peak::core::nodes::IntegerNode> widthNode, heightNode;  
+    std::shared_ptr<peak::core::nodes::IntegerNode> offsetXNode, offsetYNode;
     std::shared_ptr<peak::core::nodes::IntegerNode> payloadSizeNode;  
+    std::shared_ptr<peak::core::nodes::IntegerNode> binningHorizontalNode, binningVerticalNode;
     std::shared_ptr<peak::core::nodes::FloatNode> exposureNode;  
     std::shared_ptr<peak::core::nodes::EnumerationNode> userSetNode;  
+    std::shared_ptr<peak::core::nodes::CommandNode> userSetLoadNode;
     std::shared_ptr<peak::core::nodes::CommandNode> acquisitionStartNode, acquisitionStopNode;  
+    std::shared_ptr<peak::core::nodes::EnumerationNode> acquisitionModeNode;
     std::shared_ptr<peak::core::nodes::FloatNode> tempNode;  
     std::shared_ptr<peak::core::nodes::EnumerationNode> tempSelectorNode;
+    std::shared_ptr<peak::core::nodes::EnumerationNode> coolingControlNode;
     std::shared_ptr<peak::core::nodes::FloatNode> gainNode;  
+    std::shared_ptr<peak::core::nodes::EnumerationNode> gainSelectorNode;
     // INDI Offset is backed by the IDS/GenICam BlackLevel node.
     std::shared_ptr<peak::core::nodes::FloatNode> blackLevelNode;  
     std::shared_ptr<peak::core::nodes::FloatNode> pixelWidthNode, pixelHeightNode;  
+    std::shared_ptr<peak::core::nodes::EnumerationNode> binningSelectorNode;
+    std::shared_ptr<peak::core::nodes::EnumerationNode> binningHorizontalModeNode, binningVerticalModeNode;
     
     // EXPOSURE STATE TRACKING    
     std::atomic_bool InExposure { false };
