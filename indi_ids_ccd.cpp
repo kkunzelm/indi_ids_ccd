@@ -2788,253 +2788,44 @@ void IDS_CCD::queryPixelFormats()
 {
     LOG_INFO("=== queryPixelFormats() ENTRY ===");
 
-    m_formatMap.clear();
-    m_supportedBitDepths.clear();
-    m_compressionSupport.clear();
-
     try
     {
         if (!pixelFormatNode)
         {
             LOG_INFO("Querying pixel format node...");
-            pixelFormatNode =
-                getNode(pixelFormatNode, "PixelFormat");
+            pixelFormatNode = getNode(pixelFormatNode, "PixelFormat");
         }
         else
         {
             LOG_INFO("Using cached PixelFormat node");
         }
 
-        if (!pixelFormatNode)
-        {
-            LOG_ERROR("PixelFormat node is not available.");
-            throw std::runtime_error("PixelFormat node is not available.");
-        }
-
-        auto allEntries = pixelFormatNode->Entries();
-        LOGF_INFO("Found %zu pixel format entries", allEntries.size());
-
-        bool supports8bit  = false;
-        bool supports10bit = false;
-        bool supports12bit = false;
-        bool supports16bit = false;
-
-        auto makeExpandFunc =
-            [this](int sourceBitDepth, bool packed)
-            -> std::function<void(const uint8_t *, uint8_t *, uint32_t, uint32_t)>
-        {
-            if (sourceBitDepth == 10 && packed)
+        IDSPixelFormatManager::queryFormats(
+            pixelFormatNode,
+            m_formatMap,
+            m_supportedBitDepths,
+            m_compressionSupport,
+            m_maxBitDepth,
+            [this](const std::string &formatName)
             {
-                return [this](const uint8_t *src, uint8_t *dst, uint32_t w, uint32_t h)
-                {
-                    expand10bitPackedTo16bit(src, dst, w, h);
-                };
-            }
-
-            if (sourceBitDepth == 10 && !packed)
+                return mapCameraFormatToBayerPattern(formatName);
+            },
+            [this](const std::string &message)
             {
-                return [this](const uint8_t *src, uint8_t *dst, uint32_t w, uint32_t h)
-                {
-                    expand10bitTo16bit(src, dst, w, h);
-                };
-            }
-
-            if (sourceBitDepth == 12 && packed)
+                LOGF_INFO("%s", message.c_str());
+            },
+            [this](const std::string &message)
             {
-                return [this](const uint8_t *src, uint8_t *dst, uint32_t w, uint32_t h)
-                {
-                    expand12bitPackedTo16bit(src, dst, w, h);
-                };
-            }
-
-            if (sourceBitDepth == 12 && !packed)
+                LOGF_WARN("%s", message.c_str());
+            },
+            [this](const std::string &message)
             {
-                return [this](const uint8_t *src, uint8_t *dst, uint32_t w, uint32_t h)
-                {
-                    expand12bitTo16bit(src, dst, w, h);
-                };
-            }
-
-            return nullptr;
-        };
-
-        auto detectBitDepth = [](const std::string &formatName) -> int
-        {
-            if (formatName.find("16") != std::string::npos)
-                return 16;
-
-            if (formatName.find("12") != std::string::npos)
-                return 12;
-
-            if (formatName.find("10") != std::string::npos)
-                return 10;
-
-            if (formatName.find("8") != std::string::npos)
-                return 8;
-
-            return 8;
-        };
-
-        auto makeMonoLabel = [](int sourceBitDepth, bool packed) -> std::string
-        {
-            if (packed)
-                return std::to_string(sourceBitDepth) + "-bit (packed)";
-
-            return std::to_string(sourceBitDepth) + "-bit";
-        };
-
-        auto makeBayerLabel =
-            [this](const std::string &formatName, int sourceBitDepth, bool packed) -> std::string
-        {
-            std::string pattern = mapCameraFormatToBayerPattern(formatName);
-
-            if (pattern.empty())
-                pattern = "Bayer";
-
-            std::string label =
-                "INDI_BAYER_" + pattern + " " + std::to_string(sourceBitDepth) + "-bit";
-
-            if (packed)
-                label += " (packed)";
-
-            return label;
-        };
-
-        LOG_INFO("Processing pixel format entries...");
-
-        for (const auto &entry : allEntries)
-        {
-            try
+                LOGF_ERROR("%s", message.c_str());
+            },
+            [this](const std::string &message)
             {
-                if (entry->AccessStatus() == peak::core::nodes::NodeAccessStatus::NotAvailable ||
-                    entry->AccessStatus() == peak::core::nodes::NodeAccessStatus::NotImplemented)
-                {
-                    continue;
-                }
-
-                if (!entry->IsAvailable())
-                    continue;
-
-                const std::string formatName = entry->SymbolicValue();
-
-                const bool isMono =
-                    formatName.find("Mono") == 0;
-
-                const bool isBayer =
-                    formatName.find("Bayer") != std::string::npos;
-
-                if (!isMono && !isBayer)
-                    continue;
-
-                const int sourceBitDepth = detectBitDepth(formatName);
-                const bool packed =
-                    !formatName.empty() && formatName.back() == 'p';
-
-                // Output buffer depth. 10-bit and 12-bit are expanded to 16-bit.
-                const uint8_t outputBpp =
-                    static_cast<uint8_t>((sourceBitDepth <= 8) ? 8 : 16);
-
-                if (sourceBitDepth == 8)
-                    supports8bit = true;
-                else if (sourceBitDepth == 10)
-                    supports10bit = true;
-                else if (sourceBitDepth == 12)
-                    supports12bit = true;
-                else if (sourceBitDepth == 16)
-                    supports16bit = true;
-
-                if (packed)
-                    m_compressionSupport[sourceBitDepth] = true;
-
-                auto expandFunc = makeExpandFunc(sourceBitDepth, packed);
-
-                if (isMono)
-                {
-                    const std::string label = makeMonoLabel(sourceBitDepth, packed);
-
-                    m_formatMap[formatName] =
-                        PixelFormatInfo(formatName,
-                                        label,
-                                        outputBpp,
-                                        packed,
-                                        false,
-                                        expandFunc);
-
-                    LOGF_INFO("Available Mono format: %s -> %s, source=%d-bit, output=%u-bit%s",
-                              formatName.c_str(),
-                              label.c_str(),
-                              sourceBitDepth,
-                              outputBpp,
-                              packed ? ", packed" : "");
-                }
-                else if (isBayer)
-                {
-                    const std::string bayerPattern =
-                        mapCameraFormatToBayerPattern(formatName);
-
-                    if (bayerPattern.empty())
-                    {
-                        LOGF_DEBUG("Skipping Bayer format with unknown pattern: %s",
-                                   formatName.c_str());
-                        continue;
-                    }
-
-                    const std::string label =
-                        makeBayerLabel(formatName, sourceBitDepth, packed);
-
-                    m_formatMap[formatName] =
-                        PixelFormatInfo(formatName,
-                                        label,
-                                        outputBpp,
-                                        packed,
-                                        false,
-                                        expandFunc);
-
-                    LOGF_INFO("Available Bayer format: %s -> %s, source=%d-bit, output=%u-bit%s",
-                              formatName.c_str(),
-                              label.c_str(),
-                              sourceBitDepth,
-                              outputBpp,
-                              packed ? ", packed" : "");
-                }
-            }
-            catch (const std::exception &e)
-            {
-                LOGF_DEBUG("Skipping pixel format entry because it could not be queried: %s",
-                           e.what());
-            }
-        }
-
-        if (supports8bit)
-            m_supportedBitDepths.push_back(8);
-
-        if (supports10bit)
-            m_supportedBitDepths.push_back(10);
-
-        if (supports12bit)
-            m_supportedBitDepths.push_back(12);
-
-        if (supports16bit)
-            m_supportedBitDepths.push_back(16);
-
-        m_maxBitDepth = 8;
-
-        if (supports10bit)
-            m_maxBitDepth = 10;
-
-        if (supports12bit)
-            m_maxBitDepth = 12;
-
-        if (supports16bit)
-            m_maxBitDepth = 16;
-
-        if (m_formatMap.empty())
-        {
-            LOG_WARN("No supported Mono/Bayer pixel formats found. Falling back to Mono8.");
-            m_formatMap["Mono8"] = PixelFormatInfo("Mono8", "8-bit", 8, false, false, nullptr);
-            m_supportedBitDepths.push_back(8);
-            m_maxBitDepth = 8;
-        }
+                LOGF_DEBUG("%s", message.c_str());
+            });
 
         LOGF_INFO("Camera supports %zu usable pixel formats. Max source depth: %d",
                   m_formatMap.size(),
@@ -3269,104 +3060,24 @@ void IDS_CCD::allocateFrameBuffer()
                width, height, currentFormat.c_str(), bufferSize, actualPayloadSize);      
 }
 
-void IDS_CCD::expand10bitTo16bit(const uint8_t *src, uint8_t *dst, uint32_t width, uint32_t height)  
-{  
-    LOG_INFO("KHK inside expand10bitTo16bit");
-    const uint32_t numPixels = width * height;  
-    const uint16_t *src16 = reinterpret_cast<const uint16_t *>(src); 
-    uint16_t *dst16 = reinterpret_cast<uint16_t *>(dst);  
-    const uint16_t MASK_10_BITS = 0x03FF;  
-                
-    for (uint32_t i = 0; i < numPixels; ++i)  
-    {   
-        // Extract the 10-bit value and scale to 16-bit (left shift by 6)
-        uint16_t value_10bit = src16[i] & MASK_10_BITS;  
-        dst16[i] = static_cast<uint16_t>(value_10bit << 6);   
-        
-        // Debug first 10 pixels  
-        if (i < 10)  
-        {  
-            LOGF_INFO("KHK Mono10: src16[%d]=0x%04X, value_10bit=0x%03X, dst16[%d]=0x%04X",   
-                       i, src16[i], value_10bit, i, dst16[i]);  
-        }  
-    }
+void IDS_CCD::expand10bitTo16bit(const uint8_t *src, uint8_t *dst, uint32_t width, uint32_t height)
+{
+    IDSPixelFormatManager::expand10bitTo16bit(src, dst, width, height);
 }
 
-void IDS_CCD::expand12bitTo16bit(const uint8_t *src, uint8_t *dst, uint32_t width, uint32_t height)  
-{  
-
-    const uint32_t numPixels = width * height;  
-    const uint16_t *src16 = reinterpret_cast<const uint16_t *>(src); 
-    uint16_t *dst16 = reinterpret_cast<uint16_t *>(dst);  
-
-    // Loop without internal 'if' branches for speed
-    for (uint32_t i = 0; i < numPixels; ++i)  
-    {   
-        dst16[i] = (src16[i] & 0x0FFF) << 4;   
-    }
-
-    // Single debug block at the end
-    LOGF_DEBUG("Mono12 expanded: first pixel 0x%04X -> 0x%04X", src16[0], dst16[0]);
+void IDS_CCD::expand12bitTo16bit(const uint8_t *src, uint8_t *dst, uint32_t width, uint32_t height)
+{
+    IDSPixelFormatManager::expand12bitTo16bit(src, dst, width, height);
 }
 
 void IDS_CCD::expand10bitPackedTo16bit(const uint8_t *src, uint8_t *dst, uint32_t width, uint32_t height)
 {
-    LOG_INFO("KHK - Processing Packed Mono10p");
-    const uint32_t numPixels = width * height;
-    const uint16_t *src16 = reinterpret_cast<const uint16_t *>(src);
-    uint16_t *dst16 = reinterpret_cast<uint16_t *>(dst);
-
-    uint32_t bitPos = 0;
-    uint32_t srcIndex = 0;
-
-    for (uint32_t i = 0; i < numPixels; ++i)
-    {
-        uint32_t value = 0;
-        uint32_t bitsNeeded = 10;
-        uint32_t bitsCollected = 0;
-
-        while (bitsNeeded > 0)
-        {
-            uint32_t availableBits = 16 - (bitPos % 16);
-            uint32_t bitsToTake = std::min(availableBits, bitsNeeded);
-            uint32_t mask = (1 << bitsToTake) - 1;
-            uint32_t shifted = (src16[srcIndex] >> (bitPos % 16)) & mask;
-
-            value |= (shifted << bitsCollected);
-            bitsCollected += bitsToTake;
-            bitsNeeded -= bitsToTake;
-            bitPos += bitsToTake;
-
-            if (bitPos % 16 == 0) srcIndex++;
-        }
-        dst16[i] = static_cast<uint16_t>(value << 6);
-    }
+    IDSPixelFormatManager::expand10bitPackedTo16bit(src, dst, width, height);
 }
 
 void IDS_CCD::expand12bitPackedTo16bit(const uint8_t *src, uint8_t *dst, uint32_t width, uint32_t height)
 {
-    const uint32_t numPixels = width * height;
-    uint16_t *dst16 = reinterpret_cast<uint16_t *>(dst);
-
-    // Mono12p: 2 pixels occupy 3 bytes
-    // Byte 0: P1[11:4]
-    // Byte 1: P1[3:0] (bits 7:4) | P2[3:0] (bits 3:0)
-    // Byte 2: P2[11:4]
-    for (uint32_t i = 0; i < numPixels; i += 2)
-    {
-        uint32_t baseSrc = (i * 3) / 2;
-        
-        // Pixel 1
-        uint16_t p1 = (static_cast<uint16_t>(src[baseSrc]) << 4) | (src[baseSrc + 1] >> 4);
-        dst16[i] = p1 << 4; // Scale to 16-bit
-
-        // Pixel 2 (check if we aren't at the very last odd pixel)
-        if (i + 1 < numPixels)
-        {
-            uint16_t p2 = (static_cast<uint16_t>(src[baseSrc + 2]) << 4) | (src[baseSrc + 1] & 0x0F);
-            dst16[i + 1] = p2 << 4; // Scale to 16-bit
-        }
-    }
+    IDSPixelFormatManager::expand12bitPackedTo16bit(src, dst, width, height);
 }
 
 void IDS_CCD::setupTemperatureSensor()
