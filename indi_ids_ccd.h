@@ -5,8 +5,7 @@
 #include <peak/peak.hpp>    
 #include <peak/converters/peak_buffer_converter_ipl.hpp>    
 #include <peak_ipl/peak_ipl.hpp>    
-#include "ids_node_cache.h"
-#include "ids_pixel_format_manager.h"
+#include "ids_frame_geometry.h"
 #include <functional>  
 #include <map>  
 #include <string>  
@@ -31,6 +30,27 @@ namespace IDSConstants
     constexpr double INVALID_TEMPERATURE = -273.15;  
 }    
     
+/** * @struct PixelFormatInfo    
+ * @brief Maps between INDI and IDS pixel format names with conversion metadata    
+ * * Encapsulated pixel format metadata (must precede class)  
+ */    
+struct PixelFormatInfo {  
+    std::string idsName;  
+    std::string indiName;  
+    uint8_t bitsPerPixel;  
+    bool packed;  
+    bool isDefault; // Make sure this exists if you are passing 5 arguments  
+    std::function<void(const uint8_t*, uint8_t*, uint32_t, uint32_t)> expandFunc;  
+  
+    // Constructor to match your push_back calls  
+    PixelFormatInfo(std::string ids, std::string indi, uint8_t b, bool p, bool d,  
+                    std::function<void(const uint8_t*, uint8_t*, uint32_t, uint32_t)> f)  
+        : idsName(ids), indiName(indi), bitsPerPixel(b), packed(p), isDefault(d), expandFunc(f) {}  
+      
+    // Default constructor for map usage  
+    PixelFormatInfo() : bitsPerPixel(8), packed(false), isDefault(false) {}  
+};  
+  
 /** * @class IDS_CCD    
  * @brief INDI driver for IDS Imaging cameras    
  */    
@@ -138,12 +158,6 @@ private:
     void allocateFrameBuffer();    
     void cleanupConnection();    
     void addCaptureFormat(const PixelFormatInfo &format);  
-
-    template <typename NodeT>
-    std::shared_ptr<NodeT> getNode(std::shared_ptr<NodeT>& cache, const char* name)
-    {
-        return m_nodeCache.get(cache, nodeMapRemoteDevice, name);
-    }
     
     // BAYER HELPER FUNCTIONS  
     std::string mapCameraFormatToBayerPattern(const std::string& formatName);  
@@ -165,8 +179,6 @@ private:
   
     // Cache critical node pointers  
   
-    IDSNodeCache m_nodeCache;
-
     std::shared_ptr<peak::core::nodes::EnumerationNode> pixelFormatNode;  
     std::shared_ptr<peak::core::nodes::IntegerNode> widthNode, heightNode;  
     std::shared_ptr<peak::core::nodes::IntegerNode> offsetXNode, offsetYNode;
