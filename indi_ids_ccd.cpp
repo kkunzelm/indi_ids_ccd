@@ -448,42 +448,40 @@ void IDS_CCD::cleanupConnection()
     
 }
 
-bool IDS_CCD::initProperties()  
-{  
-    LOG_INFO("=== Starting initProperties() ===");  
-      
-    INDI::CCD::initProperties();  
-    
-    addDebugControl();    
-    addConfigurationControl();   
-    
-    LOG_DEBUG("Base CCD properties initialized"); 
-    
-    
-    CaptureFormatSP.fill(getDeviceName(), "CCD_CAPTURE_FORMAT", "Format",   
-                    IMAGE_SETTINGS_TAB, IP_RW, ISR_1OFMANY, 60, IPS_IDLE);
+bool IDS_CCD::initProperties()
+{
+    LOG_INFO("=== Starting initProperties() ===");
 
-  
-    // Setup Gain Property  
-    GainNP[0].fill("GAIN", "Gain", "%.2f", 0, 100, 1, 0);  
-    GainNP.fill(getDeviceName(), "CCD_GAIN", "Gain", MAIN_CONTROL_TAB, IP_RW, 60, IPS_IDLE);  
-    LOGF_DEBUG("Gain property initialized for device: %s", getDeviceName());  
+    INDI::CCD::initProperties();
 
-  
-    // Setup Offset Property (ADD THIS)  
-    OffsetNP[0].fill("OFFSET", "Offset", "%.2f", 0, 100, 1, 0);  
-    OffsetNP.fill(getDeviceName(), "CCD_OFFSET", "Offset", MAIN_CONTROL_TAB, IP_RW, 60, IPS_IDLE);  
-    LOGF_DEBUG("Offset property initialized for device: %s", getDeviceName());  
+    addDebugControl();
+    addConfigurationControl();
 
-  
-    // Setup Temperature Property  
-    TemperatureNP[0].fill("TEMPERATURE", "Temperature (C)", "%.2f", -50, 100, 0, 0);  
-    TemperatureNP.fill(getDeviceName(), "CCD_TEMPERATURE", "Temperature", MAIN_CONTROL_TAB, IP_RO, 60, IPS_IDLE);  
-    LOGF_DEBUG("Temperature property initialized for device: %s", getDeviceName());  
+    LOG_DEBUG("Base CCD properties initialized");
 
-  
-    LOG_INFO("=== initProperties() completed successfully ==="); 
-    return true;  
+    CaptureFormatSP.fill(getDeviceName(), "CCD_CAPTURE_FORMAT", "Format",
+                         IMAGE_SETTINGS_TAB, IP_RW, ISR_1OFMANY, 60, IPS_IDLE);
+
+    // Setup Gain Property
+    GainNP[0].fill("GAIN", "Gain", "%.2f", 0, 100, 1, 0);
+    GainNP.fill(getDeviceName(), "CCD_GAIN", "Gain", MAIN_CONTROL_TAB, IP_RW, 60, IPS_IDLE);
+    LOGF_DEBUG("Gain property initialized for device: %s", getDeviceName());
+
+    // Setup Offset Property.
+    // INDI Offset is backed internally by the IDS/GenICam BlackLevel node.
+    OffsetNP[0].fill("OFFSET", "Offset", "%.2f", 0, 100, 1, 0);
+    OffsetNP.fill(getDeviceName(), "CCD_OFFSET", "Offset", MAIN_CONTROL_TAB, IP_RW, 60, IPS_IDLE);
+    LOGF_DEBUG("Offset property initialized for device: %s", getDeviceName());
+
+    // Setup read-only temperature monitoring property.
+    // IDS cameras generally expose temperature sensors, not active cooler control.
+    TemperatureNP[0].fill("TEMPERATURE", "Sensor Temperature (C)", "%.2f", -50, 100, 0, 0);
+    TemperatureNP.fill(getDeviceName(), "CCD_TEMPERATURE", "Sensor Temperature",
+                       MAIN_CONTROL_TAB, IP_RO, 60, IPS_IDLE);
+    LOGF_DEBUG("Read-only temperature property initialized for device: %s", getDeviceName());
+
+    LOG_INFO("=== initProperties() completed successfully ===");
+    return true;
 }
 
 
@@ -841,7 +839,8 @@ void IDS_CCD::queryCameraCapabilities()
     // INDI Offset is backed by the IDS/GenICam BlackLevel node.
     HasOffset = setupBlackLevel();
 
-    // Centralized temperature check
+    // Temperature is monitoring-only.
+    // Do not advertise CCD_HAS_COOLER for IDS cameras.
     if (!HasTemperature)
     {
         LOG_INFO("Temperature sensor not available or not readable.");
@@ -850,7 +849,7 @@ void IDS_CCD::queryCameraCapabilities()
     {
         try
         {
-            LOGF_INFO("Camera temperature sensor is active. Current: %.2f C",
+            LOGF_INFO("Read-only camera temperature sensor active. Current: %.2f C",
                       tempNode->Value());
         }
         catch (const std::exception &e)
@@ -906,26 +905,6 @@ void IDS_CCD::queryCameraCapabilities()
         LOGF_DEBUG("Error checking color support: %s", e.what());
     }
 
-    // Check for cooling control
-    bool hasCooling = false;
-
-    try
-    {
-        auto coolingNode =
-            nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>(
-                "DeviceTemperatureControlMode");
-
-        if (coolingNode && coolingNode->IsWriteable())
-        {
-            hasCooling = true;
-            LOG_INFO("Camera supports cooling control");
-        }
-    }
-    catch (const std::exception &e)
-    {
-        LOGF_DEBUG("No cooling control: %s", e.what());
-    }
-
     // Check for binning support
     try
     {
@@ -979,13 +958,6 @@ void IDS_CCD::queryCameraCapabilities()
         LOGF_DEBUG("Error getting sensor info: %s", e.what());
     }
 
-    // Add cooler capability if cooling control is available
-    if (hasCooling)
-    {
-        cap |= CCD_HAS_COOLER;
-    }
-
-    // Set final capabilities
     SetCCDCapability(cap);
 
     LOGF_INFO("Final CCD capabilities: 0x%08X", cap);
@@ -3481,9 +3453,19 @@ void IDS_CCD::setupTemperatureSensor()
                 nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("DeviceTemperatureSelector");
         }
 
+        // Select a stable temperature source if the camera exposes a selector.
+        // This is monitoring-only; no cooler or setpoint control is implied.
         if (tempSelectorNode && tempSelectorNode->IsAvailable() && tempSelectorNode->IsWriteable())
         {
-            tempSelectorNode->SetCurrentEntry("Mainboard");
+            try
+            {
+                tempSelectorNode->SetCurrentEntry("Mainboard");
+                LOG_DEBUG("DeviceTemperatureSelector set to Mainboard.");
+            }
+            catch (const std::exception &e)
+            {
+                LOGF_DEBUG("Could not select Mainboard temperature source: %s", e.what());
+            }
         }
 
         if (!tempNode)
@@ -3498,15 +3480,19 @@ void IDS_CCD::setupTemperatureSensor()
             tempNode->IsReadable();
 
         if (HasTemperature)
-            LOG_INFO("Temperature sensor available.");
+        {
+            LOG_INFO("Read-only temperature sensor available.");
+        }
         else
+        {
             LOG_INFO("Temperature sensor not available.");
+        }
     }
     catch (const std::exception &e)
     {
         HasTemperature = false;
-        tempNode = nullptr;
-        tempSelectorNode = nullptr;
+        tempNode.reset();
+        tempSelectorNode.reset();
         LOGF_INFO("Temperature sensor not available: %s", e.what());
     }
 }
