@@ -81,7 +81,7 @@ protected:
     virtual bool AbortExposure() override;    
     virtual void TimerHit() override;    
     
-    // TEMPERATURE CONTROL FUNCTIONS    
+    // TEMPERATURE MONITORING FUNCTIONS
     void setupTemperatureSensor();  
     double getTemperature();   
     void updateTemperatureProperty(); 
@@ -190,7 +190,6 @@ private:
     std::shared_ptr<peak::core::nodes::EnumerationNode> acquisitionModeNode;
     std::shared_ptr<peak::core::nodes::FloatNode> tempNode;  
     std::shared_ptr<peak::core::nodes::EnumerationNode> tempSelectorNode;
-    std::shared_ptr<peak::core::nodes::EnumerationNode> coolingControlNode;
     std::shared_ptr<peak::core::nodes::FloatNode> gainNode;  
     std::shared_ptr<peak::core::nodes::EnumerationNode> gainSelectorNode;
     // INDI Offset is backed by the IDS/GenICam BlackLevel node.
@@ -202,8 +201,6 @@ private:
     // EXPOSURE STATE TRACKING    
     std::atomic_bool InExposure { false };
     std::atomic_bool m_isAcquiring { false };
-
-    float TemperatureRequest { 0 };
 
     std::mutex exposureStateMutex;
     struct timeval ExpStart {};
