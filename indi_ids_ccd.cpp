@@ -845,16 +845,13 @@ void IDS_CCD::queryCameraCapabilities()
     {
         LOG_INFO("Temperature sensor not available or not readable.");
     }
-    else if (tempNode && tempNode->IsAvailable())
+    else
     {
-        try
+        const double temperature = getTemperature();
+        if (temperature > IDSConstants::INVALID_TEMPERATURE)
         {
             LOGF_INFO("Read-only camera temperature sensor active. Current: %.2f C",
-                      tempNode->Value());
-        }
-        catch (const std::exception &e)
-        {
-            LOGF_DEBUG("Could not read temperature during capability query: %s", e.what());
+                      temperature);
         }
     }
 
@@ -3316,64 +3313,20 @@ void IDS_CCD::expand12bitPackedTo16bit(const uint8_t *src, uint8_t *dst, uint32_
 
 void IDS_CCD::setupTemperatureSensor()
 {
-    HasTemperature = false;
-
-    if (!nodeMapRemoteDevice)
-    {
-        LOG_WARN("Cannot setup temperature sensor: node map is not available.");
-        return;
-    }
-
-    try
-    {
-        if (!tempSelectorNode)
+    HasTemperature = temperatureController.setup(
+        nodeMapRemoteDevice,
+        [this](const std::string &message)
         {
-            tempSelectorNode =
-                nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("DeviceTemperatureSelector");
-        }
-
-        // Select a stable temperature source if the camera exposes a selector.
-        // This is monitoring-only; no cooler or setpoint control is implied.
-        if (tempSelectorNode && tempSelectorNode->IsAvailable() && tempSelectorNode->IsWriteable())
+            LOGF_INFO("%s", message.c_str());
+        },
+        [this](const std::string &message)
         {
-            try
-            {
-                tempSelectorNode->SetCurrentEntry("Mainboard");
-                LOG_DEBUG("DeviceTemperatureSelector set to Mainboard.");
-            }
-            catch (const std::exception &e)
-            {
-                LOGF_DEBUG("Could not select Mainboard temperature source: %s", e.what());
-            }
-        }
-
-        if (!tempNode)
+            LOGF_WARN("%s", message.c_str());
+        },
+        [this](const std::string &message)
         {
-            tempNode =
-                nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("DeviceTemperature");
-        }
-
-        HasTemperature =
-            tempNode &&
-            tempNode->IsAvailable() &&
-            tempNode->IsReadable();
-
-        if (HasTemperature)
-        {
-            LOG_INFO("Read-only temperature sensor available.");
-        }
-        else
-        {
-            LOG_INFO("Temperature sensor not available.");
-        }
-    }
-    catch (const std::exception &e)
-    {
-        HasTemperature = false;
-        tempNode.reset();
-        tempSelectorNode.reset();
-        LOGF_INFO("Temperature sensor not available: %s", e.what());
-    }
+            LOGF_DEBUG("%s", message.c_str());
+        });
 }
 
 /**
@@ -3383,21 +3336,15 @@ void IDS_CCD::setupTemperatureSensor()
 
 double IDS_CCD::getTemperature()
 {
-    if (!HasTemperature || !tempNode)
+    if (!HasTemperature)
         return IDSConstants::INVALID_TEMPERATURE;
 
-    try
-    {
-        if (!tempNode->IsAvailable() || !tempNode->IsReadable())
-            return IDSConstants::INVALID_TEMPERATURE;
-
-        return tempNode->Value();
-    }
-    catch (const std::exception &e)
-    {
-        LOGF_DEBUG("Failed to read temperature: %s", e.what());
-        return IDSConstants::INVALID_TEMPERATURE;
-    }
+    return temperatureController.read(
+        IDSConstants::INVALID_TEMPERATURE,
+        [this](const std::string &message)
+        {
+            LOGF_DEBUG("%s", message.c_str());
+        });
 }
 
 void IDS_CCD::updateTemperatureProperty()

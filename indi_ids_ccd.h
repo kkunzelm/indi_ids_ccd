@@ -6,6 +6,7 @@
 #include <peak/converters/peak_buffer_converter_ipl.hpp>    
 #include <peak_ipl/peak_ipl.hpp>    
 #include "ids_frame_geometry.h"
+#include "ids_temperature_controller.h"
 #include <functional>  
 #include <map>  
 #include <string>  
@@ -177,6 +178,7 @@ private:
     std::shared_ptr<peak::core::DataStream> dataStream;    
     std::shared_ptr<peak::core::NodeMap> nodeMapRemoteDevice;    
   
+    IDSTemperatureController temperatureController;
     // Cache critical node pointers  
   
     std::shared_ptr<peak::core::nodes::EnumerationNode> pixelFormatNode;  
@@ -189,8 +191,6 @@ private:
     std::shared_ptr<peak::core::nodes::CommandNode> userSetLoadNode;
     std::shared_ptr<peak::core::nodes::CommandNode> acquisitionStartNode, acquisitionStopNode;  
     std::shared_ptr<peak::core::nodes::EnumerationNode> acquisitionModeNode;
-    std::shared_ptr<peak::core::nodes::FloatNode> tempNode;  
-    std::shared_ptr<peak::core::nodes::EnumerationNode> tempSelectorNode;
     std::shared_ptr<peak::core::nodes::FloatNode> gainNode;  
     std::shared_ptr<peak::core::nodes::EnumerationNode> gainSelectorNode;
     // INDI Offset is backed by the IDS/GenICam BlackLevel node.
