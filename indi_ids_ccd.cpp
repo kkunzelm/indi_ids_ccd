@@ -831,38 +831,8 @@ void IDS_CCD::queryCameraCapabilities()
         LOGF_DEBUG("No gain control: %s", e.what());
     }
 
-    // Check for offset / black level control
-    try
-    {
-        if (!blackLevelNode)
-            blackLevelNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("BlackLevel");
-
-        if (blackLevelNode && blackLevelNode->IsReadable())
-        {
-            HasOffset = true;
-
-            const double minOffset = blackLevelNode->Minimum();
-            const double maxOffset = blackLevelNode->Maximum();
-            const double valOffset = blackLevelNode->Value();
-
-            double stepOffset = 1.0;
-            if (blackLevelNode->HasConstantIncrement())
-                stepOffset = blackLevelNode->Increment();
-            else if (maxOffset > minOffset)
-                stepOffset = (maxOffset - minOffset) / 100.0;
-
-            OffsetNP[0].setMin(minOffset);
-            OffsetNP[0].setMax(maxOffset);
-            OffsetNP[0].setStep(stepOffset);
-            OffsetNP[0].setValue(valOffset);
-
-            LOGF_INFO("Camera supports offset: %.2f to %.2f", minOffset, maxOffset);
-        }
-    }
-    catch (const std::exception &e)
-    {
-        LOGF_DEBUG("No offset control: %s", e.what());
-    }
+    // INDI Offset is backed by the IDS/GenICam BlackLevel node.
+    HasOffset = setupBlackLevel();
 
     // Centralized temperature check
     if (!HasTemperature)
@@ -2071,13 +2041,22 @@ bool IDS_CCD::ISNewNumber(const char *dev, const char *name, double values[], ch
 
             try
             {
-                if (blackLevelNode)
-                    blackLevelNode->SetValue(OffsetNP[0].value);
-                else
-                    nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("BlackLevel")->SetValue(OffsetNP[0].value);
+                if (!blackLevelNode)
+                {
+                    blackLevelNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("BlackLevel");
+                }
+
+                if (!blackLevelNode ||
+                    blackLevelNode->AccessStatus() != peak::core::nodes::NodeAccessStatus::ReadWrite)
+                {
+                    throw std::runtime_error("BlackLevel/Offset node is not writable");
+                }
+
+                blackLevelNode->SetValue(OffsetNP[0].value);
+                OffsetNP[0].setValue(blackLevelNode->Value());
 
                 OffsetNP.setState(IPS_OK);
-                LOGF_INFO("Offset set to %.2f", OffsetNP[0].value);
+                LOGF_INFO("Offset set to %.2f via BlackLevel", OffsetNP[0].value);
                 saveConfig(true, OffsetNP.getName());
             }
             catch (const std::exception &e)
@@ -2157,29 +2136,64 @@ bool IDS_CCD::setupBlackLevel()
 {
     try
     {
-        // Check if BlackLevel node exists
-        if (!blackLevelNode) 
-             blackLevelNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("BlackLevel");
-
+        // INDI exposes this control as Offset. IDS/GenICam exposes the same
+        // camera function as BlackLevel. Keep exactly one cached node for it.
         if (!blackLevelNode)
         {
-            LOG_INFO("Camera does not support BlackLevel control");
+            blackLevelNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("BlackLevel");
+        }
+
+        if (!blackLevelNode || !blackLevelNode->IsReadable())
+        {
+            LOG_INFO("Camera does not support readable BlackLevel/Offset control");
             return false;
         }
 
-        // Check if node is readable and writeable
         if (blackLevelNode->AccessStatus() != peak::core::nodes::NodeAccessStatus::ReadWrite)
         {
-            LOG_INFO("BlackLevel is not writeable");
+            LOG_INFO("BlackLevel/Offset is not writable");
             return false;
         }
 
-        LOG_INFO("BlackLevel control available");
+        const double minOffset     = blackLevelNode->Minimum();
+        const double maxOffset     = blackLevelNode->Maximum();
+        const double currentOffset = blackLevelNode->Value();
+
+        double offsetStep = 1.0;
+        if (blackLevelNode->HasConstantIncrement())
+        {
+            offsetStep = blackLevelNode->Increment();
+        }
+        else if (maxOffset > minOffset)
+        {
+            offsetStep = (maxOffset - minOffset) / 100.0;
+        }
+
+        OffsetNP[0].fill("OFFSET",
+                         "Offset",
+                         "%.2f",
+                         minOffset,
+                         maxOffset,
+                         offsetStep,
+                         currentOffset);
+
+        OffsetNP.fill(getDeviceName(),
+                      "CCD_OFFSET",
+                      "Offset",
+                      MAIN_CONTROL_TAB,
+                      IP_RW,
+                      60,
+                      IPS_IDLE);
+
+        LOGF_INFO("BlackLevel/Offset control available: %.2f - %.2f (step: %.2f, current: %.2f)",
+                  minOffset, maxOffset, offsetStep, currentOffset);
+
         return true;
     }
     catch (const std::exception &e)
     {
-        LOGF_ERROR("Failed to check BlackLevel support: %s", e.what());
+        LOGF_DEBUG("No BlackLevel/Offset control: %s", e.what());
+        blackLevelNode.reset();
         return false;
     }
 }
@@ -3483,38 +3497,51 @@ void IDS_CCD::updateTemperatureProperty()
         TemperatureNP.apply();
 }
 
-void IDS_CCD::updateBlackLevelRange()    
-{   
-    if (!HasOffset) return;    
-        
-    try    
-    {    
-        if (!blackLevelNode)  
-            blackLevelNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("BlackLevel");  
-  
-        double minOffset = blackLevelNode->Minimum();    
-        double maxOffset = blackLevelNode->Maximum();    
-        double currentOffset = blackLevelNode->Value();    
-        double offsetStep = 1.0;    
-            
-        if (blackLevelNode->HasConstantIncrement())    
-        {    
-            offsetStep = blackLevelNode->Increment();    
-        }    
-            
-        // Update legacy INumberVectorProperty    
-        OffsetNP[0].min = minOffset;    
-        OffsetNP[0].max = maxOffset;    
-        OffsetNP[0].step = offsetStep;    
-        OffsetNP[0].value = currentOffset;    
-            
-        LOGF_INFO("BlackLevel range updated: %.2f - %.2f (step: %.2f, current: %.2f)",     
-                  minOffset, maxOffset, offsetStep, currentOffset);    
-    }    
-    catch (const std::exception &e)    
-    {    
-        LOGF_ERROR("Failed to update blacklevel range: %s", e.what());    
-    }    
+void IDS_CCD::updateBlackLevelRange()
+{
+    if (!HasOffset)
+    {
+        return;
+    }
+
+    try
+    {
+        if (!blackLevelNode)
+        {
+            blackLevelNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("BlackLevel");
+        }
+
+        if (!blackLevelNode || !blackLevelNode->IsReadable())
+        {
+            throw std::runtime_error("BlackLevel/Offset node is not readable");
+        }
+
+        const double minOffset     = blackLevelNode->Minimum();
+        const double maxOffset     = blackLevelNode->Maximum();
+        const double currentOffset = blackLevelNode->Value();
+
+        double offsetStep = 1.0;
+        if (blackLevelNode->HasConstantIncrement())
+        {
+            offsetStep = blackLevelNode->Increment();
+        }
+        else if (maxOffset > minOffset)
+        {
+            offsetStep = (maxOffset - minOffset) / 100.0;
+        }
+
+        OffsetNP[0].setMin(minOffset);
+        OffsetNP[0].setMax(maxOffset);
+        OffsetNP[0].setStep(offsetStep);
+        OffsetNP[0].setValue(currentOffset);
+
+        LOGF_INFO("BlackLevel/Offset range updated: %.2f - %.2f (step: %.2f, current: %.2f)",
+                  minOffset, maxOffset, offsetStep, currentOffset);
+    }
+    catch (const std::exception &e)
+    {
+        LOGF_ERROR("Failed to update BlackLevel/Offset range: %s", e.what());
+    }
 }
 
 void IDS_CCD::addCaptureFormat(const PixelFormatInfo &format)
@@ -4209,57 +4236,10 @@ bool IDS_CCD::setupParams()
 
         LOGF_INFO("Full exposure range: %.6fs - %.6fs", fullMin, fullMax);
 
-        // Offset / BlackLevel setup is independent of gain support.
-        LOG_INFO("=== Setting up black level ===");
-
+        // INDI Offset is backed by the IDS/GenICam BlackLevel node.
+        LOG_INFO("=== Setting up BlackLevel/Offset ===");
         HasOffset = setupBlackLevel();
-        LOGF_INFO("Black level setup result: %s", HasOffset ? "success" : "failed");
-
-        if (HasOffset)
-        {
-            try
-            {
-                if (!blackLevelNode)
-                {
-                    blackLevelNode =
-                        nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("BlackLevel");
-                }
-
-                const double minOffset     = blackLevelNode->Minimum();
-                const double maxOffset     = blackLevelNode->Maximum();
-                const double currentOffset = blackLevelNode->Value();
-
-                double offsetStep = 1.0;
-                if (blackLevelNode->HasConstantIncrement())
-                {
-                    offsetStep = blackLevelNode->Increment();
-                }
-
-                OffsetNP[0].fill("OFFSET",
-                                 "Offset",
-                                 "%.2f",
-                                 minOffset,
-                                 maxOffset,
-                                 offsetStep,
-                                 currentOffset);
-
-                OffsetNP.fill(getDeviceName(),
-                              "CCD_OFFSET",
-                              "Offset",
-                              MAIN_CONTROL_TAB,
-                              IP_RW,
-                              60,
-                              IPS_IDLE);
-
-                LOGF_INFO("Offset range: %.2f - %.2f (step: %.2f, current: %.2f)",
-                          minOffset, maxOffset, offsetStep, currentOffset);
-            }
-            catch (const std::exception &e)
-            {
-                LOGF_WARN("Failed to query Offset parameters: %s", e.what());
-                HasOffset = false;
-            }
-        }
+        LOGF_INFO("BlackLevel/Offset setup result: %s", HasOffset ? "success" : "failed");
 
         debugCurrentState();
 
