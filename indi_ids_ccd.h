@@ -1,26 +1,32 @@
-#pragma once  
-  
-// Core INDI and IDS SDK includes    
-#include "indiccd.h"    
-#include <peak/peak.hpp>    
-#include <peak/converters/peak_buffer_converter_ipl.hpp>    
-#include <peak_ipl/peak_ipl.hpp>    
+#pragma once
+
+#include "indiccd.h"
+
+#include "ids_node_cache.h"
+#include "ids_pixel_format_manager.h"
 #include "ids_frame_geometry.h"
 #include "ids_temperature_controller.h"
-#include "ids_user_set_manager.h"
-#include <functional>  
-#include <map>  
-#include <string>  
-#include <mutex>  
-#include <memory>  
-#include <vector>
-#include <pthread.h>
-#include <sys/time.h>
+
+#include <peak/peak.hpp>
+#include <peak/converters/peak_buffer_converter_ipl.hpp>
+#include <peak_ipl/peak_ipl.hpp>
+
 #include <algorithm>
-  
-/** * @namespace IDSConstants    
- * @brief Constants specific to IDS camera driver implementation    
- */    
+#include <atomic>
+#include <cstdint>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <pthread.h>
+#include <string>
+#include <sys/time.h>
+#include <vector>
+
+/**
+ * @namespace IDSConstants
+ * @brief Constants specific to IDS camera driver implementation.
+ */
 namespace IDSConstants    
 {    
     /// Standard polling interval in milliseconds for device status updates    
@@ -32,30 +38,10 @@ namespace IDSConstants
     constexpr double INVALID_TEMPERATURE = -273.15;  
 }    
     
-/** * @struct PixelFormatInfo    
- * @brief Maps between INDI and IDS pixel format names with conversion metadata    
- * * Encapsulated pixel format metadata (must precede class)  
- */    
-struct PixelFormatInfo {  
-    std::string idsName;  
-    std::string indiName;  
-    uint8_t bitsPerPixel;  
-    bool packed;  
-    bool isDefault; // Make sure this exists if you are passing 5 arguments  
-    std::function<void(const uint8_t*, uint8_t*, uint32_t, uint32_t)> expandFunc;  
-  
-    // Constructor to match your push_back calls  
-    PixelFormatInfo(std::string ids, std::string indi, uint8_t b, bool p, bool d,  
-                    std::function<void(const uint8_t*, uint8_t*, uint32_t, uint32_t)> f)  
-        : idsName(ids), indiName(indi), bitsPerPixel(b), packed(p), isDefault(d), expandFunc(f) {}  
-      
-    // Default constructor for map usage  
-    PixelFormatInfo() : bitsPerPixel(8), packed(false), isDefault(false) {}  
-};  
-  
-/** * @class IDS_CCD    
- * @brief INDI driver for IDS Imaging cameras    
- */    
+/**
+ * @class IDS_CCD
+ * @brief INDI driver for IDS Imaging cameras.
+ */
 class IDS_CCD : public INDI::CCD    
 {    
     // INDI framework friend declarations  
@@ -71,7 +57,7 @@ public:
     virtual ~IDS_CCD() override;    
     
 protected:    
-    // CORE INDI DEVICE FUNCTIONS    
+    // INDI device lifecycle    
     bool Connect() override;    
     bool Disconnect() override;    
     const char *getDefaultName() override;    
@@ -79,28 +65,28 @@ protected:
     bool updateProperties() override;   
     void ISGetProperties(const char *dev) override;   
     
-    // EXPOSURE CONTROL FUNCTIONS    
+    // Exposure control    
     virtual bool StartExposure(float duration) override;    
     virtual bool AbortExposure() override;    
     virtual void TimerHit() override;    
     
-    // TEMPERATURE MONITORING FUNCTIONS
+    // Temperature monitoring
     void setupTemperatureSensor();  
     double getTemperature();   
     void updateTemperatureProperty(); 
     
-    // IMAGE CAPTURE AND FORMATTING    
+    // Image capture and formatting    
     virtual bool SetCaptureFormat(uint8_t index) override;    
     virtual bool UpdateCCDFrame(int x, int y, int w, int h) override;    
     virtual bool UpdateCCDBin(int binx, int biny) override;    
     virtual void addFITSKeywords(INDI::CCDChip *targetChip,    
                                 std::vector<INDI::FITSRecord> &fitsKeywords) override;    
     
-    // PROPERTY HANDLING    
+    // INDI property handling    
     virtual bool ISNewNumber(const char *dev, const char *name, double values[],    
                             char *names[], int n) override;    
     
-    // CAMERA CONTROL PROPERTIES    
+    // INDI camera control properties    
     INDI::PropertyNumber GainNP{1};  
     bool HasGain = false;    
         
@@ -115,7 +101,7 @@ protected:
     bool m_hasBayer {false};  
     std::string m_bayerPattern;  
     
-    // CAMERA SETUP FUNCTIONS    
+    // Camera setup    
     bool selectGainChannel();    
     bool setupBlackLevel();    
   
@@ -154,32 +140,34 @@ private:
     void exposureSetRequest(ImageState request);      
       
   
-    // UTILITY FUNCTIONS    
+    // Utility functions    
     float CalcTimeLeft();    
     bool setupParams();    
     void allocateFrameBuffer();    
     void cleanupConnection();    
     void addCaptureFormat(const PixelFormatInfo &format);  
     
-    // BAYER HELPER FUNCTIONS  
+    // Bayer helper functions  
     std::string mapCameraFormatToBayerPattern(const std::string& formatName);  
     void addBayerCaptureFormats(std::vector<PixelFormatInfo>& captureFormats,   
                                const std::string& bayerPattern,  
                                const std::vector<int>& supportedDepths);  
     
-    // IDS CAMERA HARDWARE INTERFACE    
+    // IDS camera hardware interface    
     bool initCamera();    
     void queryCameraCapabilities();    
     bool configureExposure(float duration);    
     bool startAcquisition();    
     bool stopAcquisition();    
     
-    // CAMERA OBJECTS AND RESOURCES    
+    // Camera objects and resources    
     std::shared_ptr<peak::core::Device> device;    
     std::shared_ptr<peak::core::DataStream> dataStream;    
     std::shared_ptr<peak::core::NodeMap> nodeMapRemoteDevice;    
   
+    // Extracted helper controllers
     IDSTemperatureController temperatureController;
+
     // Cache critical node pointers  
   
     std::shared_ptr<peak::core::nodes::EnumerationNode> pixelFormatNode;  
@@ -188,8 +176,12 @@ private:
     std::shared_ptr<peak::core::nodes::IntegerNode> payloadSizeNode;  
     std::shared_ptr<peak::core::nodes::IntegerNode> binningHorizontalNode, binningVerticalNode;
     std::shared_ptr<peak::core::nodes::FloatNode> exposureNode;  
+    std::shared_ptr<peak::core::nodes::EnumerationNode> userSetNode;  
+    std::shared_ptr<peak::core::nodes::CommandNode> userSetLoadNode;
     std::shared_ptr<peak::core::nodes::CommandNode> acquisitionStartNode, acquisitionStopNode;  
     std::shared_ptr<peak::core::nodes::EnumerationNode> acquisitionModeNode;
+    std::shared_ptr<peak::core::nodes::FloatNode> tempNode;  
+    std::shared_ptr<peak::core::nodes::EnumerationNode> tempSelectorNode;
     std::shared_ptr<peak::core::nodes::FloatNode> gainNode;  
     std::shared_ptr<peak::core::nodes::EnumerationNode> gainSelectorNode;
     // INDI Offset is backed by the IDS/GenICam BlackLevel node.
@@ -198,14 +190,14 @@ private:
     std::shared_ptr<peak::core::nodes::EnumerationNode> binningSelectorNode;
     std::shared_ptr<peak::core::nodes::EnumerationNode> binningHorizontalModeNode, binningVerticalModeNode;
     
-    // EXPOSURE STATE TRACKING    
+    // Exposure state tracking    
     std::atomic_bool InExposure { false };
     std::atomic_bool m_isAcquiring { false };
 
     std::mutex exposureStateMutex;
     struct timeval ExpStart {};
     
-    // CAMERA HARDWARE PARAMETERS    
+    // Camera hardware parameters    
     int cameraWidth { 0 };    
     int cameraHeight { 0 };    
     int cameraBPP { 16 };    
@@ -213,8 +205,7 @@ private:
     float pixelSizeY { 0.0F };    
     size_t m_currentPayloadSize { 0 };  
     
-    // PIXEL FORMAT MANAGEMENT    
-    //   
+    // Pixel format management
     void queryPixelFormats();  
     std::map<std::string, PixelFormatInfo> m_formatMap;    
         
@@ -231,12 +222,14 @@ private:
     void expand12bitPackedTo16bit(const uint8_t *src, uint8_t *dst, uint32_t width, uint32_t height);  
         
     
-    // USER SET MANAGEMENT    
-    IDSUserSetManager userSetManager;
+    // User set management    
+    std::string currentUserSet = "Default";    
     bool switchUserSet(const std::string& userSet);    
     std::vector<std::string> queryAvailableUserSets();  
+    std::vector<std::string> m_availableUserSets;    
+    bool m_userSetsQueried = false;    
     
-    // EXPOSURE LIMITS AND CONFIGURATION    
+    // Exposure limits and configuration    
     std::shared_ptr<peak::core::nodes::FloatNode> findExposureNode();
     bool queryExposureLimits();    
     double fullMin, fullMax;    
@@ -247,6 +240,6 @@ private:
     void debugCurrentState();    
     int timerID = -1;  
       
-    // BLACK LEVEL / OFFSET CONTROL
+    // Black level / offset control
     void updateBlackLevelRange();    
 };
