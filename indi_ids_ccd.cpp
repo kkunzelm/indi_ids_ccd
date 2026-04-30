@@ -631,13 +631,13 @@ bool IDS_CCD::initCamera()
 
         // 4. Cache critical node pointers
         pixelFormatNode =
-            getNode(pixelFormatNode, "PixelFormat");
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");
 
         widthNode =
-            getNode(widthNode, "Width");
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Width");
 
         heightNode =
-            getNode(heightNode, "Height");
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Height");
 
         try
         {
@@ -658,15 +658,15 @@ bool IDS_CCD::initCamera()
         }
 
         userSetNode =
-            getNode(userSetNode, "UserSetSelector");
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("UserSetSelector");
 
         try
         {
             acquisitionStartNode =
-                getNode(acquisitionStartNode, "AcquisitionStart");
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("AcquisitionStart");
 
             acquisitionStopNode =
-                getNode(acquisitionStopNode, "AcquisitionStop");
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("AcquisitionStop");
         }
         catch (const std::exception &e)
         {
@@ -679,7 +679,11 @@ bool IDS_CCD::initCamera()
         // 6. Set acquisition mode
         try
         {
-            acquisitionModeNode = getNode(acquisitionModeNode, "AcquisitionMode");
+            if (!acquisitionModeNode)
+            {
+                acquisitionModeNode =
+                    nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("AcquisitionMode");
+            }
 
             if (acquisitionModeNode && acquisitionModeNode->IsWriteable())
             {
@@ -695,7 +699,7 @@ bool IDS_CCD::initCamera()
         dataStream = device->DataStreams().at(0)->OpenDataStream();
 
         payloadSizeNode =
-            getNode(payloadSizeNode, "PayloadSize");
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("PayloadSize");
 
         const auto payloadSize = payloadSizeNode->Value();
 
@@ -746,7 +750,7 @@ std::vector<std::string> IDS_CCD::queryAvailableUserSets()
         
     try    
     {    
-        auto selector = getNode(userSetNode, "UserSetSelector");    
+        auto selector = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("UserSetSelector");    
         if (!selector)    
         {    
             LOG_ERROR("UserSetSelector not available");    
@@ -802,7 +806,8 @@ void IDS_CCD::queryCameraCapabilities()
     // Check for gain control
     try
     {
-        gainNode = getNode(gainNode, "Gain");
+        if (!gainNode)
+            gainNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("Gain");
 
         if (gainNode && gainNode->IsReadable())
         {
@@ -856,7 +861,11 @@ void IDS_CCD::queryCameraCapabilities()
     // Check for color / Bayer support
     try
     {
-        pixelFormatNode = getNode(pixelFormatNode, "PixelFormat");
+        if (!pixelFormatNode)
+        {
+            pixelFormatNode =
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");
+        }
 
         auto entries = pixelFormatNode->Entries();
 
@@ -900,7 +909,7 @@ void IDS_CCD::queryCameraCapabilities()
     try
     {
         auto binningNode =
-            getNode(binningHorizontalNode, "BinningHorizontal");
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("BinningHorizontal");
 
         if (binningNode && binningNode->IsWriteable())
         {
@@ -930,9 +939,11 @@ void IDS_CCD::queryCameraCapabilities()
     // be known yet. setupParams() will call SetCCDParams() once all values are valid.
     try
     {
-        widthNode = getNode(widthNode, "Width");
+        if (!widthNode)
+            widthNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Width");
 
-        heightNode = getNode(heightNode, "Height");
+        if (!heightNode)
+            heightNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Height");
 
         if (widthNode && heightNode)
         {
@@ -1894,7 +1905,10 @@ bool IDS_CCD::selectGainChannel()
     try  
     {  
         // Check if GainSelector exists  
-        gainSelectorNode = getNode(gainSelectorNode, "GainSelector");
+        if (!gainSelectorNode)
+        {
+            gainSelectorNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("GainSelector");
+        }
 
         if (!gainSelectorNode)  
         {  
@@ -1976,7 +1990,10 @@ bool IDS_CCD::ISNewNumber(const char *dev, const char *name, double values[], ch
 
             try
             {
-                gainNode = getNode(gainNode, "Gain");
+                if (!gainNode)
+                {
+                    gainNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("Gain");
+                }
 
                 if (!gainNode || !gainNode->IsWriteable())
                 {
@@ -2014,7 +2031,10 @@ bool IDS_CCD::ISNewNumber(const char *dev, const char *name, double values[], ch
 
             try
             {
-                blackLevelNode = getNode(blackLevelNode, "BlackLevel");
+                if (!blackLevelNode)
+                {
+                    blackLevelNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("BlackLevel");
+                }
 
                 if (!blackLevelNode ||
                     blackLevelNode->AccessStatus() != peak::core::nodes::NodeAccessStatus::ReadWrite)
@@ -2108,7 +2128,10 @@ bool IDS_CCD::setupBlackLevel()
     {
         // INDI exposes this control as Offset. IDS/GenICam exposes the same
         // camera function as BlackLevel. Keep exactly one cached node for it.
-        blackLevelNode = getNode(blackLevelNode, "BlackLevel");
+        if (!blackLevelNode)
+        {
+            blackLevelNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("BlackLevel");
+        }
 
         if (!blackLevelNode || !blackLevelNode->IsReadable())
         {
@@ -2188,22 +2211,17 @@ bool IDS_CCD::UpdateCCDFrame(int x, int y, int w, int h)
         return false;
     }
 
-    if (w <= 0 || h <= 0)
-    {
-        LOGF_ERROR("Invalid frame dimensions: w=%d h=%d", w, h);
-        return false;
-    }
+    const IDSFrameGeometry::Frame requestedFrame {x, y, w, h};
 
-    if (x < 0 || y < 0)
+    if (!IDSFrameGeometry::isValidFrameRequest(
+            requestedFrame,
+            cameraWidth,
+            cameraHeight,
+            [this](const std::string &message)
+            {
+                LOGF_ERROR("%s", message.c_str());
+            }))
     {
-        LOGF_ERROR("Invalid frame origin: x=%d y=%d", x, y);
-        return false;
-    }
-
-    if (x + w > cameraWidth || y + h > cameraHeight)
-    {
-        LOGF_ERROR("ROI exceeds sensor boundaries: sensor=%dx%d, requested=(%d,%d)+(%d,%d)",
-                   cameraWidth, cameraHeight, x, y, w, h);
         return false;
     }
 
@@ -2249,13 +2267,25 @@ bool IDS_CCD::UpdateCCDFrame(int x, int y, int w, int h)
 
     try
     {
-        offsetXNode = getNode(offsetXNode, "OffsetX");
+        if (!offsetXNode)
+        {
+            offsetXNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("OffsetX");
+        }
 
-        offsetYNode = getNode(offsetYNode, "OffsetY");
+        if (!offsetYNode)
+        {
+            offsetYNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("OffsetY");
+        }
 
-        widthNode = getNode(widthNode, "Width");
+        if (!widthNode)
+        {
+            widthNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Width");
+        }
 
-        heightNode = getNode(heightNode, "Height");
+        if (!heightNode)
+        {
+            heightNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Height");
+        }
 
         if (!widthNode || !heightNode || !offsetXNode || !offsetYNode)
         {
@@ -2263,44 +2293,14 @@ bool IDS_CCD::UpdateCCDFrame(int x, int y, int w, int h)
             return false;
         }
 
-        const int adj_unbinned_w = ((w + binX - 1) / binX) * binX;
-        const int adj_unbinned_h = ((h + binY - 1) / binY) * binY;
-        const int adj_unbinned_x = (x / binX) * binX;
-        const int adj_unbinned_y = (y / binY) * binY;
+        const auto normalizedFrame = IDSFrameGeometry::normalizeFrameRequest(
+            requestedFrame, binX, binY, offsetXNode, offsetYNode, widthNode, heightNode);
 
-        const int64_t binned_x = adj_unbinned_x / binX;
-        const int64_t binned_y = adj_unbinned_y / binY;
-        const int64_t binned_w = adj_unbinned_w / binX;
-        const int64_t binned_h = adj_unbinned_h / binY;
-
-        const int64_t x_min = offsetXNode->Minimum();
-        const int64_t y_min = offsetYNode->Minimum();
-        const int64_t w_min = widthNode->Minimum();
-        const int64_t h_min = heightNode->Minimum();
-
-        const int64_t x_inc = std::max<int64_t>(1, offsetXNode->Increment());
-        const int64_t y_inc = std::max<int64_t>(1, offsetYNode->Increment());
-        const int64_t w_inc = std::max<int64_t>(1, widthNode->Increment());
-        const int64_t h_inc = std::max<int64_t>(1, heightNode->Increment());
-
-        auto norm = [](int64_t val, int64_t min, int64_t inc)
-        {
-            if (val < min)
-                return min;
-
-            return ((val - min) / inc) * inc + min;
-        };
-
-        const int64_t adj_x = norm(binned_x, x_min, x_inc);
-        const int64_t adj_y = norm(binned_y, y_min, y_inc);
-        const int64_t adj_w = norm(binned_w, w_min, w_inc);
-        const int64_t adj_h = norm(binned_h, h_min, h_inc);
-
-        if (adj_w <= 0 || adj_h <= 0)
+        if (normalizedFrame.hardwareW <= 0 || normalizedFrame.hardwareH <= 0)
         {
             LOGF_ERROR("Normalized ROI dimensions are invalid: w=%lld h=%lld",
-                       static_cast<long long>(adj_w),
-                       static_cast<long long>(adj_h));
+                       static_cast<long long>(normalizedFrame.hardwareW),
+                       static_cast<long long>(normalizedFrame.hardwareH));
             return false;
         }
 
@@ -2308,18 +2308,15 @@ bool IDS_CCD::UpdateCCDFrame(int x, int y, int w, int h)
          * Second no-op path after normalization.
          * This catches cases where the requested ROI differs only by alignment.
          */
-        const int newSubX = static_cast<int>(adj_x * binX);
-        const int newSubY = static_cast<int>(adj_y * binY);
-        const int newSubW = static_cast<int>(adj_w * binX);
-        const int newSubH = static_cast<int>(adj_h * binY);
+        const auto newFrame = normalizedFrame.indiFrame;
 
-        if (PrimaryCCD.getSubX() == newSubX &&
-            PrimaryCCD.getSubY() == newSubY &&
-            PrimaryCCD.getSubW() == newSubW &&
-            PrimaryCCD.getSubH() == newSubH)
+        if (PrimaryCCD.getSubX() == newFrame.x &&
+            PrimaryCCD.getSubY() == newFrame.y &&
+            PrimaryCCD.getSubW() == newFrame.w &&
+            PrimaryCCD.getSubH() == newFrame.h)
         {
             LOGF_DEBUG("Normalized ROI already active: x=%d y=%d w=%d h=%d; skipping hardware reconfiguration.",
-                       newSubX, newSubY, newSubW, newSubH);
+                       newFrame.x, newFrame.y, newFrame.w, newFrame.h);
             return true;
         }
 
@@ -2373,30 +2370,17 @@ bool IDS_CCD::UpdateCCDFrame(int x, int y, int w, int h)
             return false;
         }
 
-        /*
-         * Now change ROI nodes.
-         * Many GenICam cameras require offsets to be reduced before width/height changes.
-         */
-        offsetXNode->SetValue(x_min);
-        offsetYNode->SetValue(y_min);
-
-        widthNode->SetValue(w_min);
-        heightNode->SetValue(h_min);
-
-        widthNode->SetValue(adj_w);
-        heightNode->SetValue(adj_h);
-
-        offsetXNode->SetValue(adj_x);
-        offsetYNode->SetValue(adj_y);
+        IDSFrameGeometry::applyHardwareFrame(
+            normalizedFrame, offsetXNode, offsetYNode, widthNode, heightNode);
 
         LOGF_INFO("Hardware ROI set (binned): x=%lld y=%lld w=%lld h=%lld",
-                  static_cast<long long>(adj_x),
-                  static_cast<long long>(adj_y),
-                  static_cast<long long>(adj_w),
-                  static_cast<long long>(adj_h));
+                  static_cast<long long>(normalizedFrame.hardwareX),
+                  static_cast<long long>(normalizedFrame.hardwareY),
+                  static_cast<long long>(normalizedFrame.hardwareW),
+                  static_cast<long long>(normalizedFrame.hardwareH));
 
         payloadSizeNode =
-            getNode(payloadSizeNode, "PayloadSize");
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("PayloadSize");
 
         const size_t payloadSize = static_cast<size_t>(payloadSizeNode->Value());
 
@@ -2417,12 +2401,12 @@ bool IDS_CCD::UpdateCCDFrame(int x, int y, int w, int h)
             dataStream->QueueBuffer(buffer);
         }
 
-        PrimaryCCD.setFrame(newSubX, newSubY, newSubW, newSubH);
+        PrimaryCCD.setFrame(newFrame.x, newFrame.y, newFrame.w, newFrame.h);
 
         allocateFrameBuffer();
 
         LOGF_INFO("ROI update complete: x=%d y=%d w=%d h=%d, payload=%zu, buffers=%zu",
-                  newSubX, newSubY, newSubW, newSubH, payloadSize, numBuffers);
+                  newFrame.x, newFrame.y, newFrame.w, newFrame.h, payloadSize, numBuffers);
 
         return true;
     }
@@ -2461,9 +2445,15 @@ bool IDS_CCD::UpdateCCDBin(int binX, int binY)
         return false;
     }  
       
-    binningHorizontalNode = getNode(binningHorizontalNode, "BinningHorizontal");
+    if (!binningHorizontalNode)
+    {
+        binningHorizontalNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("BinningHorizontal");
+    }
 
-    binningVerticalNode = getNode(binningVerticalNode, "BinningVertical");
+    if (!binningVerticalNode)
+    {
+        binningVerticalNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("BinningVertical");
+    }
 
     if (!binningHorizontalNode || !binningVerticalNode)      
     {      
@@ -2490,109 +2480,50 @@ bool IDS_CCD::UpdateCCDBin(int binX, int binY)
     try      
     {      
         // Check if BinningSelector exists and is usable      
-        binningSelectorNode = getNode(binningSelectorNode, "BinningSelector");
+        if (!binningSelectorNode)
+        {
+            binningSelectorNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("BinningSelector");
+        }
 
-        if (binningSelectorNode && binningSelectorNode->IsWriteable())      
-        {      
-            // Try to find Region0 or any available entry      
-            auto entries = binningSelectorNode->Entries();      
-            for (const auto& entry : entries)      
-            {      
-                std::string entryName;    
-                try      
-                {      
-                    entryName = entry->SymbolicValue();      
-                    binningSelectorNode->SetCurrentEntry(entryName);      
-                    LOGF_DEBUG("Using binning selector entry: %s", entryName.c_str());      
-                    break;      
-                }      
-                catch (const std::exception &e)      
-                {      
-                    LOGF_DEBUG("Cannot use binning selector entry %s: %s", entryName.c_str(), e.what());      
-                    continue;      
-                }      
-            }      
-        }      
+        IDSFrameGeometry::selectFirstUsableBinningRegion(
+            binningSelectorNode,
+            [this](const std::string &message)
+            {
+                LOGF_DEBUG("%s", message.c_str());
+            });
       
         // Set binning values      
         binningHorizontalNode->SetValue(binX);      
         binningVerticalNode->SetValue(binY);      
       
         // Set binning modes if available - CHECK AVAILABLE MODES FIRST  
-        binningHorizontalModeNode = getNode(binningHorizontalModeNode, "BinningHorizontalMode");
+        if (!binningHorizontalModeNode)
+        {
+            binningHorizontalModeNode =
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("BinningHorizontalMode");
+        }
 
-        binningVerticalModeNode = getNode(binningVerticalModeNode, "BinningVerticalMode");
+        if (!binningVerticalModeNode)
+        {
+            binningVerticalModeNode =
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("BinningVerticalMode");
+        }
       
-        std::string availableMode = "";  
-          
-        if (binningHorizontalModeNode && binningHorizontalModeNode->IsWriteable())      
-        {      
-            // Find available modes  
-            auto entries = binningHorizontalModeNode->Entries();  
-            for (const auto& entry : entries)  
-            {  
-                if (entry->IsAvailable())  
-                {  
-                    std::string modeName = entry->SymbolicValue();  
-                    // Try common modes in order of preference  
-                    if (modeName == "Average" || modeName == "Sum" || modeName == "Mean")  
-                    {  
-                        try  
-                        {  
-                            binningHorizontalModeNode->SetCurrentEntry(modeName);  
-                            availableMode = modeName;  
-                            LOGF_INFO("Using horizontal binning mode: %s", modeName.c_str());  
-                            break;  
-                        }  
-                        catch (const std::exception &e)  
-                        {  
-                            LOGF_DEBUG("Cannot set binning mode %s: %s", modeName.c_str(), e.what());  
-                            continue;  
-                        }  
-                    }  
-                }  
-            }  
-              
-            // If no preferred mode found, try any available mode  
-            if (availableMode.empty())  
-            {  
-                for (const auto& entry : entries)  
-                {  
-                    if (entry->IsAvailable())  
-                    {  
-                        std::string modeName = entry->SymbolicValue();  
-                        try  
-                        {  
-                            binningHorizontalModeNode->SetCurrentEntry(modeName);  
-                            availableMode = modeName;  
-                            LOGF_INFO("Using available horizontal binning mode: %s", modeName.c_str());  
-                            break;  
-                        }  
-                        catch (const std::exception &e)  
-                        {  
-                            LOGF_DEBUG("Cannot set binning mode %s: %s", modeName.c_str(), e.what());  
-                            continue;  
-                        }  
-                    }  
-                }  
-            }  
-        }      
-          
-        if (binningVerticalModeNode && binningVerticalModeNode->IsWriteable())      
-        {      
-            if (!availableMode.empty())  
-            {  
-                try  
-                {  
-                    binningVerticalModeNode->SetCurrentEntry(availableMode);  
-                    LOGF_INFO("Using vertical binning mode: %s", availableMode.c_str());  
-                }  
-                catch (const std::exception &e)  
-                {  
-                    LOGF_WARN("Cannot set vertical binning mode %s: %s", availableMode.c_str(), e.what());  
-                }  
-            }  
-        }      
+        const std::string availableMode = IDSFrameGeometry::configureBinningModes(
+            binningHorizontalModeNode,
+            binningVerticalModeNode,
+            [this](const std::string &message)
+            {
+                LOGF_INFO("%s", message.c_str());
+            },
+            [this](const std::string &message)
+            {
+                LOGF_WARN("%s", message.c_str());
+            },
+            [this](const std::string &message)
+            {
+                LOGF_DEBUG("%s", message.c_str());
+            });
       
         LOGF_INFO("Hardware binning applied: %dx%d%s", binX, binY,   
                   availableMode.empty() ? "" : (", Mode: " + availableMode).c_str());      
@@ -2641,9 +2572,15 @@ bool IDS_CCD::switchUserSet(const std::string &userSet)
     {      
         LOGF_INFO("Switching from %s to %s UserSet", currentUserSet.c_str(), userSet.c_str());      
       
-        userSetNode = getNode(userSetNode, "UserSetSelector");
+        if (!userSetNode)
+        {
+            userSetNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("UserSetSelector");
+        }
 
-        userSetLoadNode = getNode(userSetLoadNode, "UserSetLoad");
+        if (!userSetLoadNode)
+        {
+            userSetLoadNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::CommandNode>("UserSetLoad");
+        }
 
         if (!userSetNode || !userSetLoadNode)      
         {      
@@ -2668,7 +2605,11 @@ bool IDS_CCD::switchUserSet(const std::string &userSet)
 
         try
         {
-            pixelFormatNode = getNode(pixelFormatNode, "PixelFormat");
+            if (!pixelFormatNode)
+            {
+                pixelFormatNode =
+                    nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");
+            }
 
             if (!pixelFormatNode)
             {
@@ -2788,44 +2729,253 @@ void IDS_CCD::queryPixelFormats()
 {
     LOG_INFO("=== queryPixelFormats() ENTRY ===");
 
+    m_formatMap.clear();
+    m_supportedBitDepths.clear();
+    m_compressionSupport.clear();
+
     try
     {
         if (!pixelFormatNode)
         {
             LOG_INFO("Querying pixel format node...");
-            pixelFormatNode = getNode(pixelFormatNode, "PixelFormat");
+            pixelFormatNode =
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");
         }
         else
         {
             LOG_INFO("Using cached PixelFormat node");
         }
 
-        IDSPixelFormatManager::queryFormats(
-            pixelFormatNode,
-            m_formatMap,
-            m_supportedBitDepths,
-            m_compressionSupport,
-            m_maxBitDepth,
-            [this](const std::string &formatName)
+        if (!pixelFormatNode)
+        {
+            LOG_ERROR("PixelFormat node is not available.");
+            throw std::runtime_error("PixelFormat node is not available.");
+        }
+
+        auto allEntries = pixelFormatNode->Entries();
+        LOGF_INFO("Found %zu pixel format entries", allEntries.size());
+
+        bool supports8bit  = false;
+        bool supports10bit = false;
+        bool supports12bit = false;
+        bool supports16bit = false;
+
+        auto makeExpandFunc =
+            [this](int sourceBitDepth, bool packed)
+            -> std::function<void(const uint8_t *, uint8_t *, uint32_t, uint32_t)>
+        {
+            if (sourceBitDepth == 10 && packed)
             {
-                return mapCameraFormatToBayerPattern(formatName);
-            },
-            [this](const std::string &message)
+                return [this](const uint8_t *src, uint8_t *dst, uint32_t w, uint32_t h)
+                {
+                    expand10bitPackedTo16bit(src, dst, w, h);
+                };
+            }
+
+            if (sourceBitDepth == 10 && !packed)
             {
-                LOGF_INFO("%s", message.c_str());
-            },
-            [this](const std::string &message)
+                return [this](const uint8_t *src, uint8_t *dst, uint32_t w, uint32_t h)
+                {
+                    expand10bitTo16bit(src, dst, w, h);
+                };
+            }
+
+            if (sourceBitDepth == 12 && packed)
             {
-                LOGF_WARN("%s", message.c_str());
-            },
-            [this](const std::string &message)
+                return [this](const uint8_t *src, uint8_t *dst, uint32_t w, uint32_t h)
+                {
+                    expand12bitPackedTo16bit(src, dst, w, h);
+                };
+            }
+
+            if (sourceBitDepth == 12 && !packed)
             {
-                LOGF_ERROR("%s", message.c_str());
-            },
-            [this](const std::string &message)
+                return [this](const uint8_t *src, uint8_t *dst, uint32_t w, uint32_t h)
+                {
+                    expand12bitTo16bit(src, dst, w, h);
+                };
+            }
+
+            return nullptr;
+        };
+
+        auto detectBitDepth = [](const std::string &formatName) -> int
+        {
+            if (formatName.find("16") != std::string::npos)
+                return 16;
+
+            if (formatName.find("12") != std::string::npos)
+                return 12;
+
+            if (formatName.find("10") != std::string::npos)
+                return 10;
+
+            if (formatName.find("8") != std::string::npos)
+                return 8;
+
+            return 8;
+        };
+
+        auto makeMonoLabel = [](int sourceBitDepth, bool packed) -> std::string
+        {
+            if (packed)
+                return std::to_string(sourceBitDepth) + "-bit (packed)";
+
+            return std::to_string(sourceBitDepth) + "-bit";
+        };
+
+        auto makeBayerLabel =
+            [this](const std::string &formatName, int sourceBitDepth, bool packed) -> std::string
+        {
+            std::string pattern = mapCameraFormatToBayerPattern(formatName);
+
+            if (pattern.empty())
+                pattern = "Bayer";
+
+            std::string label =
+                "INDI_BAYER_" + pattern + " " + std::to_string(sourceBitDepth) + "-bit";
+
+            if (packed)
+                label += " (packed)";
+
+            return label;
+        };
+
+        LOG_INFO("Processing pixel format entries...");
+
+        for (const auto &entry : allEntries)
+        {
+            try
             {
-                LOGF_DEBUG("%s", message.c_str());
-            });
+                if (entry->AccessStatus() == peak::core::nodes::NodeAccessStatus::NotAvailable ||
+                    entry->AccessStatus() == peak::core::nodes::NodeAccessStatus::NotImplemented)
+                {
+                    continue;
+                }
+
+                if (!entry->IsAvailable())
+                    continue;
+
+                const std::string formatName = entry->SymbolicValue();
+
+                const bool isMono =
+                    formatName.find("Mono") == 0;
+
+                const bool isBayer =
+                    formatName.find("Bayer") != std::string::npos;
+
+                if (!isMono && !isBayer)
+                    continue;
+
+                const int sourceBitDepth = detectBitDepth(formatName);
+                const bool packed =
+                    !formatName.empty() && formatName.back() == 'p';
+
+                // Output buffer depth. 10-bit and 12-bit are expanded to 16-bit.
+                const uint8_t outputBpp =
+                    static_cast<uint8_t>((sourceBitDepth <= 8) ? 8 : 16);
+
+                if (sourceBitDepth == 8)
+                    supports8bit = true;
+                else if (sourceBitDepth == 10)
+                    supports10bit = true;
+                else if (sourceBitDepth == 12)
+                    supports12bit = true;
+                else if (sourceBitDepth == 16)
+                    supports16bit = true;
+
+                if (packed)
+                    m_compressionSupport[sourceBitDepth] = true;
+
+                auto expandFunc = makeExpandFunc(sourceBitDepth, packed);
+
+                if (isMono)
+                {
+                    const std::string label = makeMonoLabel(sourceBitDepth, packed);
+
+                    m_formatMap[formatName] =
+                        PixelFormatInfo(formatName,
+                                        label,
+                                        outputBpp,
+                                        packed,
+                                        false,
+                                        expandFunc);
+
+                    LOGF_INFO("Available Mono format: %s -> %s, source=%d-bit, output=%u-bit%s",
+                              formatName.c_str(),
+                              label.c_str(),
+                              sourceBitDepth,
+                              outputBpp,
+                              packed ? ", packed" : "");
+                }
+                else if (isBayer)
+                {
+                    const std::string bayerPattern =
+                        mapCameraFormatToBayerPattern(formatName);
+
+                    if (bayerPattern.empty())
+                    {
+                        LOGF_DEBUG("Skipping Bayer format with unknown pattern: %s",
+                                   formatName.c_str());
+                        continue;
+                    }
+
+                    const std::string label =
+                        makeBayerLabel(formatName, sourceBitDepth, packed);
+
+                    m_formatMap[formatName] =
+                        PixelFormatInfo(formatName,
+                                        label,
+                                        outputBpp,
+                                        packed,
+                                        false,
+                                        expandFunc);
+
+                    LOGF_INFO("Available Bayer format: %s -> %s, source=%d-bit, output=%u-bit%s",
+                              formatName.c_str(),
+                              label.c_str(),
+                              sourceBitDepth,
+                              outputBpp,
+                              packed ? ", packed" : "");
+                }
+            }
+            catch (const std::exception &e)
+            {
+                LOGF_DEBUG("Skipping pixel format entry because it could not be queried: %s",
+                           e.what());
+            }
+        }
+
+        if (supports8bit)
+            m_supportedBitDepths.push_back(8);
+
+        if (supports10bit)
+            m_supportedBitDepths.push_back(10);
+
+        if (supports12bit)
+            m_supportedBitDepths.push_back(12);
+
+        if (supports16bit)
+            m_supportedBitDepths.push_back(16);
+
+        m_maxBitDepth = 8;
+
+        if (supports10bit)
+            m_maxBitDepth = 10;
+
+        if (supports12bit)
+            m_maxBitDepth = 12;
+
+        if (supports16bit)
+            m_maxBitDepth = 16;
+
+        if (m_formatMap.empty())
+        {
+            LOG_WARN("No supported Mono/Bayer pixel formats found. Falling back to Mono8.");
+            m_formatMap["Mono8"] = PixelFormatInfo("Mono8", "8-bit", 8, false, false, nullptr);
+            m_supportedBitDepths.push_back(8);
+            m_maxBitDepth = 8;
+        }
 
         LOGF_INFO("Camera supports %zu usable pixel formats. Max source depth: %d",
                   m_formatMap.size(),
@@ -2941,7 +3091,7 @@ bool IDS_CCD::SetCaptureFormat(uint8_t index)
 
         // Reallocate buffers for the new payload size.
         payloadSizeNode =
-            getNode(payloadSizeNode, "PayloadSize");
+            nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("PayloadSize");
 
         const size_t payloadSize = static_cast<size_t>(payloadSizeNode->Value());
 
@@ -3006,7 +3156,8 @@ void IDS_CCD::allocateFrameBuffer()
     }      
           
     // Fetch the hardware's expected payload size  
-    payloadSizeNode = getNode(payloadSizeNode, "PayloadSize");  
+    if (!payloadSizeNode)  
+        payloadSizeNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("PayloadSize");  
   
     if (!payloadSizeNode)    
     {      
@@ -3019,7 +3170,10 @@ void IDS_CCD::allocateFrameBuffer()
     // Get current format and determine if it's Bayer  
     std::string currentFormat = "Mono8"; // default  
       
-    pixelFormatNode = getNode(pixelFormatNode, "PixelFormat");
+    if (!pixelFormatNode)
+    {
+        pixelFormatNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("PixelFormat");
+    }
 
     if (pixelFormatNode)  
     {  
@@ -3060,24 +3214,104 @@ void IDS_CCD::allocateFrameBuffer()
                width, height, currentFormat.c_str(), bufferSize, actualPayloadSize);      
 }
 
-void IDS_CCD::expand10bitTo16bit(const uint8_t *src, uint8_t *dst, uint32_t width, uint32_t height)
-{
-    IDSPixelFormatManager::expand10bitTo16bit(src, dst, width, height);
+void IDS_CCD::expand10bitTo16bit(const uint8_t *src, uint8_t *dst, uint32_t width, uint32_t height)  
+{  
+    LOG_INFO("KHK inside expand10bitTo16bit");
+    const uint32_t numPixels = width * height;  
+    const uint16_t *src16 = reinterpret_cast<const uint16_t *>(src); 
+    uint16_t *dst16 = reinterpret_cast<uint16_t *>(dst);  
+    const uint16_t MASK_10_BITS = 0x03FF;  
+                
+    for (uint32_t i = 0; i < numPixels; ++i)  
+    {   
+        // Extract the 10-bit value and scale to 16-bit (left shift by 6)
+        uint16_t value_10bit = src16[i] & MASK_10_BITS;  
+        dst16[i] = static_cast<uint16_t>(value_10bit << 6);   
+        
+        // Debug first 10 pixels  
+        if (i < 10)  
+        {  
+            LOGF_INFO("KHK Mono10: src16[%d]=0x%04X, value_10bit=0x%03X, dst16[%d]=0x%04X",   
+                       i, src16[i], value_10bit, i, dst16[i]);  
+        }  
+    }
 }
 
-void IDS_CCD::expand12bitTo16bit(const uint8_t *src, uint8_t *dst, uint32_t width, uint32_t height)
-{
-    IDSPixelFormatManager::expand12bitTo16bit(src, dst, width, height);
+void IDS_CCD::expand12bitTo16bit(const uint8_t *src, uint8_t *dst, uint32_t width, uint32_t height)  
+{  
+
+    const uint32_t numPixels = width * height;  
+    const uint16_t *src16 = reinterpret_cast<const uint16_t *>(src); 
+    uint16_t *dst16 = reinterpret_cast<uint16_t *>(dst);  
+
+    // Loop without internal 'if' branches for speed
+    for (uint32_t i = 0; i < numPixels; ++i)  
+    {   
+        dst16[i] = (src16[i] & 0x0FFF) << 4;   
+    }
+
+    // Single debug block at the end
+    LOGF_DEBUG("Mono12 expanded: first pixel 0x%04X -> 0x%04X", src16[0], dst16[0]);
 }
 
 void IDS_CCD::expand10bitPackedTo16bit(const uint8_t *src, uint8_t *dst, uint32_t width, uint32_t height)
 {
-    IDSPixelFormatManager::expand10bitPackedTo16bit(src, dst, width, height);
+    LOG_INFO("KHK - Processing Packed Mono10p");
+    const uint32_t numPixels = width * height;
+    const uint16_t *src16 = reinterpret_cast<const uint16_t *>(src);
+    uint16_t *dst16 = reinterpret_cast<uint16_t *>(dst);
+
+    uint32_t bitPos = 0;
+    uint32_t srcIndex = 0;
+
+    for (uint32_t i = 0; i < numPixels; ++i)
+    {
+        uint32_t value = 0;
+        uint32_t bitsNeeded = 10;
+        uint32_t bitsCollected = 0;
+
+        while (bitsNeeded > 0)
+        {
+            uint32_t availableBits = 16 - (bitPos % 16);
+            uint32_t bitsToTake = std::min(availableBits, bitsNeeded);
+            uint32_t mask = (1 << bitsToTake) - 1;
+            uint32_t shifted = (src16[srcIndex] >> (bitPos % 16)) & mask;
+
+            value |= (shifted << bitsCollected);
+            bitsCollected += bitsToTake;
+            bitsNeeded -= bitsToTake;
+            bitPos += bitsToTake;
+
+            if (bitPos % 16 == 0) srcIndex++;
+        }
+        dst16[i] = static_cast<uint16_t>(value << 6);
+    }
 }
 
 void IDS_CCD::expand12bitPackedTo16bit(const uint8_t *src, uint8_t *dst, uint32_t width, uint32_t height)
 {
-    IDSPixelFormatManager::expand12bitPackedTo16bit(src, dst, width, height);
+    const uint32_t numPixels = width * height;
+    uint16_t *dst16 = reinterpret_cast<uint16_t *>(dst);
+
+    // Mono12p: 2 pixels occupy 3 bytes
+    // Byte 0: P1[11:4]
+    // Byte 1: P1[3:0] (bits 7:4) | P2[3:0] (bits 3:0)
+    // Byte 2: P2[11:4]
+    for (uint32_t i = 0; i < numPixels; i += 2)
+    {
+        uint32_t baseSrc = (i * 3) / 2;
+        
+        // Pixel 1
+        uint16_t p1 = (static_cast<uint16_t>(src[baseSrc]) << 4) | (src[baseSrc + 1] >> 4);
+        dst16[i] = p1 << 4; // Scale to 16-bit
+
+        // Pixel 2 (check if we aren't at the very last odd pixel)
+        if (i + 1 < numPixels)
+        {
+            uint16_t p2 = (static_cast<uint16_t>(src[baseSrc + 2]) << 4) | (src[baseSrc + 1] & 0x0F);
+            dst16[i + 1] = p2 << 4; // Scale to 16-bit
+        }
+    }
 }
 
 void IDS_CCD::setupTemperatureSensor()
@@ -3092,7 +3326,11 @@ void IDS_CCD::setupTemperatureSensor()
 
     try
     {
-        tempSelectorNode = getNode(tempSelectorNode, "DeviceTemperatureSelector");
+        if (!tempSelectorNode)
+        {
+            tempSelectorNode =
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("DeviceTemperatureSelector");
+        }
 
         // Select a stable temperature source if the camera exposes a selector.
         // This is monitoring-only; no cooler or setpoint control is implied.
@@ -3109,7 +3347,11 @@ void IDS_CCD::setupTemperatureSensor()
             }
         }
 
-        tempNode = getNode(tempNode, "DeviceTemperature");
+        if (!tempNode)
+        {
+            tempNode =
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("DeviceTemperature");
+        }
 
         HasTemperature =
             tempNode &&
@@ -3189,7 +3431,10 @@ void IDS_CCD::updateBlackLevelRange()
 
     try
     {
-        blackLevelNode = getNode(blackLevelNode, "BlackLevel");
+        if (!blackLevelNode)
+        {
+            blackLevelNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("BlackLevel");
+        }
 
         if (!blackLevelNode || !blackLevelNode->IsReadable())
         {
@@ -3369,7 +3614,7 @@ void IDS_CCD::debugCurrentState()
             try
             {
                 auto userSetSelector =
-                    getNode(userSetNode, "UserSetSelector");
+                    nodeMapRemoteDevice->FindNode<peak::core::nodes::EnumerationNode>("UserSetSelector");
 
                 if (userSetSelector && userSetSelector->IsAvailable())
                 {
@@ -3434,9 +3679,15 @@ bool IDS_CCD::setupParams()
         updateTemperatureProperty();
 
         // Query sensor dimensions
-        widthNode = getNode(widthNode, "Width");
+        if (!widthNode)
+        {
+            widthNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Width");
+        }
 
-        heightNode = getNode(heightNode, "Height");
+        if (!heightNode)
+        {
+            heightNode = nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("Height");
+        }
 
         if (widthNode && heightNode)
         {
@@ -3446,9 +3697,17 @@ bool IDS_CCD::setupParams()
         }
 
         // Query pixel size directly from camera in micrometers
-        pixelWidthNode = getNode(pixelWidthNode, "SensorPixelWidth");
+        if (!pixelWidthNode)
+        {
+            pixelWidthNode =
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("SensorPixelWidth");
+        }
 
-        pixelHeightNode = getNode(pixelHeightNode, "SensorPixelHeight");
+        if (!pixelHeightNode)
+        {
+            pixelHeightNode =
+                nodeMapRemoteDevice->FindNode<peak::core::nodes::FloatNode>("SensorPixelHeight");
+        }
 
         if (pixelWidthNode && pixelHeightNode)
         {
@@ -3723,7 +3982,7 @@ bool IDS_CCD::setupParams()
             try
             {
                 payloadSizeNode =
-                    getNode(payloadSizeNode, "PayloadSize");
+                    nodeMapRemoteDevice->FindNode<peak::core::nodes::IntegerNode>("PayloadSize");
 
                 size_t payloadSize = static_cast<size_t>(payloadSizeNode->Value());
 
